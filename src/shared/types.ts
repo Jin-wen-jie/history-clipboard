@@ -1,0 +1,82 @@
+export type HistoryType = "text" | "image";
+
+export type HistoryFilterType = "all" | HistoryType;
+
+export type TextHistoryItem = {
+  id: string;
+  type: "text";
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+  pinned: boolean;
+  copyCount: number;
+};
+
+export type ImageHistoryItem = {
+  id: string;
+  type: "image";
+  thumbnailDataUrl: string;
+  width: number;
+  height: number;
+  byteSize: number;
+  createdAt: string;
+  updatedAt: string;
+  pinned: boolean;
+  copyCount: number;
+};
+
+export type HistoryItem = TextHistoryItem | ImageHistoryItem;
+
+export type HistoryQuery = {
+  search?: string;
+  type?: HistoryFilterType;
+};
+
+export type AppSettings = {
+  captureEnabled: boolean;
+  maxTextItems: number;
+  maxImageItems: number;
+  maxTextLength: number;
+  maxImageBytes: number;
+  hotkey: string;
+  launchAtStartup: boolean;
+  sensitiveFilterEnabled: boolean;
+};
+
+export type StorageStats = {
+  totalItems: number;
+  textItems: number;
+  imageItems: number;
+  imageBytes: number;
+};
+
+export type HistoryResult =
+  | { ok: true; item: HistoryItem }
+  | { ok: false; reason: "blank" | "too-large" | "sensitive" | "missing" };
+
+export type ClipboardContent =
+  | { type: "text"; text: string }
+  | { type: "image"; png: Uint8Array };
+
+export type ClipboardHistoryApi = {
+  list(query?: HistoryQuery): Promise<HistoryItem[]>;
+  copy(id: string): Promise<{ ok: boolean }>;
+  delete(id: string): Promise<{ ok: boolean }>;
+  clear(type?: HistoryFilterType): Promise<void>;
+  setPinned(id: string, pinned: boolean): Promise<{ ok: boolean }>;
+  getSettings(): Promise<AppSettings>;
+  updateSettings(settings: Partial<AppSettings>): Promise<AppSettings>;
+  getStats(): Promise<StorageStats>;
+  showWindow(): Promise<void>;
+};
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  captureEnabled: true,
+  maxTextItems: 1000,
+  maxImageItems: 200,
+  maxTextLength: 20_000,
+  maxImageBytes: 10 * 1024 * 1024,
+  hotkey: "Ctrl+Alt+V",
+  launchAtStartup: false,
+  sensitiveFilterEnabled: true
+};
