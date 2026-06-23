@@ -1,5 +1,5 @@
 import { Check, Clipboard, Copy, Image, Pause, Pin, PinOff, Play, RefreshCw, Search, Settings, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings, HistoryFilterType, HistoryItem, StorageStats } from "../../shared/types";
 
 type LoadState = "idle" | "loading" | "error";
@@ -12,6 +12,8 @@ export function App() {
   const [search, setSearch] = useState("");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [lastAction, setLastAction] = useState("");
+  const historyListRef = useRef<HTMLElement | null>(null);
+  const latestItemIdRef = useRef<string | undefined>(undefined);
 
   const load = useCallback(async () => {
     setLoadState("loading");
@@ -25,9 +27,15 @@ export function App() {
         window.clipHistory.getStats(),
         window.clipHistory.list({ type: filterType, search })
       ]);
+      const nextLatestItemId = nextItems[0]?.id;
+      const previousLatestItemId = latestItemIdRef.current;
       setSettings(nextSettings);
       setStats(nextStats);
       setItems(nextItems);
+      latestItemIdRef.current = nextLatestItemId;
+      if (previousLatestItemId && nextLatestItemId && previousLatestItemId !== nextLatestItemId) {
+        historyListRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      }
       setLoadState("idle");
       setLastAction("");
     } catch (error) {
@@ -111,7 +119,7 @@ export function App() {
           <span>{lastAction}</span>
         </div>
 
-        <section className="history-list" aria-label="剪贴板历史">
+        <section className="history-list" aria-label="剪贴板历史" ref={historyListRef}>
           {items.length === 0 ? (
             <div className="empty-state">
               <Clipboard size={28} />

@@ -62,4 +62,26 @@ describe("ClipboardWatcher", () => {
 
     expect(addText).toHaveBeenCalledWith("plain text");
   });
+
+  test("does not record the same image again while the clipboard is unchanged", async () => {
+    const addImage = vi.fn();
+    const image = {
+      png: Buffer.from([1, 2, 3]),
+      thumbnailPng: Buffer.from([9]),
+      width: 16,
+      height: 9
+    };
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => "",
+      readImage: () => image,
+      addText: vi.fn(),
+      addImage
+    });
+
+    await watcher.captureOnce();
+    await watcher.captureOnce();
+
+    expect(addImage).toHaveBeenCalledTimes(1);
+  });
 });

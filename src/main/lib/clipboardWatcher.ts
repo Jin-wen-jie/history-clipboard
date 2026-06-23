@@ -1,5 +1,6 @@
 import type { AppSettings, HistoryResult } from "../../shared/types";
 import type { ImageInput } from "./historyStore";
+import { createHash } from "node:crypto";
 
 export type ClipboardWatcherOptions = {
   getSettings: () => Promise<AppSettings>;
@@ -12,6 +13,7 @@ export type ClipboardWatcherOptions = {
 
 export class ClipboardWatcher {
   private timer?: NodeJS.Timeout;
+  private lastCaptureKey?: string;
 
   constructor(private readonly options: ClipboardWatcherOptions) {}
 
@@ -42,10 +44,27 @@ export class ClipboardWatcher {
 
     const image = this.options.readImage();
     if (image) {
+      const captureKey = hashCapture("image", image.png);
+      if (this.lastCaptureKey === captureKey) {
+        return;
+      }
+
       await this.options.addImage(image);
+      this.lastCaptureKey = captureKey;
       return;
     }
 
-    await this.options.addText(this.options.readText());
+    const text = this.options.readText();
+    const captureKey = hashCapture("text", Buffer.from(text, "utf8"));
+    if (this.lastCaptureKey === captureKey) {
+      return;
+    }
+
+    await this.options.addText(text);
+    this.lastCaptureKey = captureKey;
   }
+}
+
+function hashCapture(type: "text" | "image", data: Buffer): string {
+  return createHash("sha256").update(type).update("\0").update(data).digest("hex");
 }
