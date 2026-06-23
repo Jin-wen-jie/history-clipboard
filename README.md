@@ -4,7 +4,7 @@
 
 ## 下载
 
-[点击下载 Windows 安装包](https://github.com/Jin-wen-jie/-/raw/main/downloads/history-clipboard-setup-0.1.0.exe)
+[点击下载 Windows 安装包](https://github.com/Jin-wen-jie/history-clipboard/raw/main/downloads/history-clipboard-setup-0.1.0.exe)
 
 ## 功能
 
