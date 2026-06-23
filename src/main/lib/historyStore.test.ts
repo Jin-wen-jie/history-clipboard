@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -106,5 +106,27 @@ describe("HistoryStore", () => {
     })).filter((item) => item.type === "text").map((item) => item.text);
 
     expect(texts).toEqual(["noon"]);
+  });
+
+  test("skips unreadable entries instead of failing the whole list", async () => {
+    await writeFile(join(dir, "history.json"), JSON.stringify({
+      version: 1,
+      items: [
+        {
+          id: "missing-content",
+          type: "text",
+          hash: "hash",
+          contentKey: "missing.text",
+          createdAt: "2026-06-23T12:00:00.000Z",
+          updatedAt: "2026-06-23T12:00:00.000Z",
+          pinned: false,
+          copyCount: 1
+        }
+      ]
+    }), "utf8");
+    const reloaded = new HistoryStore(dir, new MemoryKeyProvider(), settings, { now: () => currentTime });
+    await reloaded.init();
+
+    await expect(reloaded.list()).resolves.toEqual([]);
   });
 });

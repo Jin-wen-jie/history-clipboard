@@ -6,6 +6,14 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   preload: {
+    build: {
+      rollupOptions: {
+        output: {
+          format: "cjs",
+          entryFileNames: "[name].js"
+        }
+      }
+    },
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {

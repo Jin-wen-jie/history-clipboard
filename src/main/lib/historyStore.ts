@@ -83,13 +83,19 @@ export class HistoryStore {
     const from = parseTime(query.from);
     const to = parseTime(query.to);
     const visibleItems: HistoryItem[] = [];
+    const unreadableItems: StoredItem[] = [];
 
     for (const item of this.sortedItems()) {
       if (type !== "all" && item.type !== type) {
         continue;
       }
 
-      const publicItem = await this.toPublicItem(item);
+      const publicItem = await this.tryToPublicItem(item);
+      if (!publicItem) {
+        unreadableItems.push(item);
+        continue;
+      }
+
       const updatedAt = Date.parse(publicItem.updatedAt);
       if (from !== undefined && updatedAt < from) {
         continue;
@@ -108,6 +114,11 @@ export class HistoryStore {
       }
 
       visibleItems.push(publicItem);
+    }
+
+    if (unreadableItems.length > 0) {
+      await this.removeItems(unreadableItems);
+      await this.saveMetadata();
     }
 
     return visibleItems;
@@ -287,6 +298,14 @@ export class HistoryStore {
     };
   }
 
+  private async tryToPublicItem(item: StoredItem): Promise<HistoryItem | undefined> {
+    try {
+      return await this.toPublicItem(item);
+    } catch {
+      return undefined;
+    }
+  }
+
   private sortedItems(): StoredItem[] {
     return [...this.items].sort((a, b) => {
       if (a.pinned !== b.pinned) {
@@ -310,8 +329,7 @@ export class HistoryStore {
     }
 
     const removedIds = new Set(removed.map((item) => item.id));
-    this.items = this.items.filter((item) => !removedIds.has(item.id));
-    await Promise.all(removed.map((item) => this.deleteContent(item)));
+    await this.removeItemsById(removedIds, removed);
   }
 
   private async trimToMaxItems(): Promise<void> {
@@ -322,6 +340,14 @@ export class HistoryStore {
     }
 
     const removedIds = new Set(removed.map((item) => item.id));
+    await this.removeItemsById(removedIds, removed);
+  }
+
+  private async removeItems(items: StoredItem[]): Promise<void> {
+    await this.removeItemsById(new Set(items.map((item) => item.id)), items);
+  }
+
+  private async removeItemsById(removedIds: Set<string>, removed: StoredItem[]): Promise<void> {
     this.items = this.items.filter((item) => !removedIds.has(item.id));
     await Promise.all(removed.map((item) => this.deleteContent(item)));
   }

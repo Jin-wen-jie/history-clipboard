@@ -1,6 +1,7 @@
 import { Check, Clipboard, Copy, Image, Pause, Pin, PinOff, Play, RefreshCw, Search, Settings, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppSettings, HistoryFilterType, HistoryItem, StorageStats } from "../../shared/types";
+import { toIsoTime } from "./timeFilters";
 
 type LoadState = "idle" | "loading" | "error";
 
@@ -18,6 +19,10 @@ export function App() {
   const load = useCallback(async () => {
     setLoadState("loading");
     try {
+      if (!window.clipHistory) {
+        throw new Error("桌面桥接未加载，请重新安装或重启应用");
+      }
+
       const [nextSettings, nextStats, nextItems] = await Promise.all([
         window.clipHistory.getSettings(),
         window.clipHistory.getStats(),
@@ -27,7 +32,9 @@ export function App() {
       setStats(nextStats);
       setItems(nextItems);
       setLoadState("idle");
-    } catch {
+      setLastAction("");
+    } catch (error) {
+      setLastAction(error instanceof Error ? error.message : String(error));
       setLoadState("error");
     }
   }, [filterType, fromTime, search, toTime]);
@@ -111,7 +118,7 @@ export function App() {
         </div>
 
         <div className="status-line">
-          <span>{loadState === "error" ? "读取失败" : `${items.length} 条记录`}</span>
+          <span>{loadState === "error" ? `读取失败${lastAction ? `：${lastAction}` : ""}` : `${items.length} 条记录`}</span>
           <span>{lastAction}</span>
         </div>
 
@@ -235,12 +242,4 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
-}
-
-function toIsoTime(value: string): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  return new Date(value).toISOString();
 }
