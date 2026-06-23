@@ -1,7 +1,6 @@
 import { Check, Clipboard, Copy, Image, Pause, Pin, PinOff, Play, RefreshCw, Search, Settings, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppSettings, HistoryFilterType, HistoryItem, StorageStats } from "../../shared/types";
-import { toIsoTime } from "./timeFilters";
 
 type LoadState = "idle" | "loading" | "error";
 
@@ -11,8 +10,6 @@ export function App() {
   const [stats, setStats] = useState<StorageStats | undefined>();
   const [filterType, setFilterType] = useState<HistoryFilterType>("all");
   const [search, setSearch] = useState("");
-  const [fromTime, setFromTime] = useState("");
-  const [toTime, setToTime] = useState("");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [lastAction, setLastAction] = useState("");
 
@@ -26,7 +23,7 @@ export function App() {
       const [nextSettings, nextStats, nextItems] = await Promise.all([
         window.clipHistory.getSettings(),
         window.clipHistory.getStats(),
-        window.clipHistory.list({ type: filterType, search, from: toIsoTime(fromTime), to: toIsoTime(toTime) })
+        window.clipHistory.list({ type: filterType, search })
       ]);
       setSettings(nextSettings);
       setStats(nextStats);
@@ -37,7 +34,7 @@ export function App() {
       setLastAction(error instanceof Error ? error.message : String(error));
       setLoadState("error");
     }
-  }, [filterType, fromTime, search, toTime]);
+  }, [filterType, search]);
 
   useEffect(() => {
     void load();
@@ -107,18 +104,10 @@ export function App() {
               </button>
             ))}
           </div>
-          <label className="time-box">
-            <span>从</span>
-            <input type="datetime-local" value={fromTime} onChange={(event) => setFromTime(event.target.value)} />
-          </label>
-          <label className="time-box">
-            <span>到</span>
-            <input type="datetime-local" value={toTime} onChange={(event) => setToTime(event.target.value)} />
-          </label>
         </div>
 
         <div className="status-line">
-          <span>{loadState === "error" ? `读取失败${lastAction ? `：${lastAction}` : ""}` : `${items.length} 条记录`}</span>
+          <span>{loadState === "error" ? `读取失败${lastAction ? `：${lastAction}` : ""}` : `最近 ${items.length} 条记录`}</span>
           <span>{lastAction}</span>
         </div>
 

@@ -14,6 +14,16 @@ let store: HistoryStore;
 let watcher: ClipboardWatcher;
 let isQuitting = false;
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    showWindow();
+  });
+}
+
 async function bootstrap(): Promise<void> {
   await app.whenReady();
 
@@ -185,8 +195,22 @@ function toggleWindow(): void {
 }
 
 function showWindow(): void {
-  mainWindow?.show();
-  mainWindow?.focus();
+  if (!mainWindow) {
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow.center();
+  mainWindow.show();
+  mainWindow.moveTop();
+  mainWindow.focus();
+  mainWindow.setAlwaysOnTop(true);
+  setTimeout(() => {
+    mainWindow?.setAlwaysOnTop(false);
+  }, 800);
 }
 
 function toElectronAccelerator(hotkey: string): string {

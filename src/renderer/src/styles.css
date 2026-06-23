@@ -59,13 +59,12 @@ h1 {
 
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto minmax(150px, 190px) minmax(150px, 190px);
+  grid-template-columns: minmax(180px, 1fr) auto;
   gap: 12px;
   padding: 0 24px 12px;
 }
 
-.search-box,
-.time-box {
+.search-box {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -76,19 +75,12 @@ h1 {
   background: #ffffff;
 }
 
-.search-box input,
-.time-box input {
+.search-box input {
   width: 100%;
   min-width: 0;
   border: 0;
   outline: 0;
   background: transparent;
-}
-
-.time-box span {
-  flex: 0 0 auto;
-  color: #65716d;
-  font-size: 12px;
 }
 
 .segments {
