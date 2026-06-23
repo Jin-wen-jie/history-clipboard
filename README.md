@@ -2,6 +2,10 @@
 
 一个本地 Windows 剪贴板历史工具，支持文本和图片记录。内容只保存在本机，文本和图片原始内容会加密落盘。
 
+## 下载
+
+[点击下载 Windows 安装包](https://github.com/Jin-wen-jie/-/raw/main/downloads/history-clipboard-setup-0.1.0.exe)
+
 ## 功能
 
 - 自动记录纯文本剪贴板历史
