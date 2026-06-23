@@ -36,6 +36,10 @@ type MetadataFile = {
   items: StoredItem[];
 };
 
+type HistoryStoreOptions = {
+  now?: () => Date;
+};
+
 export type ImageInput = {
   png: Buffer;
   thumbnailPng: Buffer;
@@ -54,7 +58,8 @@ export class HistoryStore {
   constructor(
     private readonly rootDir: string,
     keyProvider: ContentKeyProvider,
-    initialSettings: AppSettings = DEFAULT_SETTINGS
+    initialSettings: AppSettings = DEFAULT_SETTINGS,
+    private readonly options: HistoryStoreOptions = {}
   ) {
     this.metadataPath = join(rootDir, "history.json");
     this.settingsPath = join(rootDir, "settings.json");
@@ -70,8 +75,13 @@ export class HistoryStore {
   }
 
   async list(query: HistoryQuery = {}): Promise<HistoryItem[]> {
+    await this.enforceRetention();
+    await this.saveMetadata();
+
     const type = query.type ?? "all";
     const search = query.search?.trim().toLocaleLowerCase();
+    const from = parseTime(query.from);
+    const to = parseTime(query.to);
     const visibleItems: HistoryItem[] = [];
 
     for (const item of this.sortedItems()) {
@@ -80,6 +90,15 @@ export class HistoryStore {
       }
 
       const publicItem = await this.toPublicItem(item);
+      const updatedAt = Date.parse(publicItem.updatedAt);
+      if (from !== undefined && updatedAt < from) {
+        continue;
+      }
+
+      if (to !== undefined && updatedAt > to) {
+        continue;
+      }
+
       if (search && publicItem.type === "text" && !publicItem.text.toLocaleLowerCase().includes(search)) {
         continue;
       }
@@ -115,7 +134,7 @@ export class HistoryStore {
     const hash = hashBytes("image", input.png);
     const existing = this.items.find((item) => item.type === "image" && item.hash === hash);
     if (existing) {
-      existing.updatedAt = now();
+      existing.updatedAt = this.now();
       existing.copyCount += 1;
       await this.saveMetadata();
       return { ok: true, item: await this.toPublicItem(existing) };
@@ -131,8 +150,8 @@ export class HistoryStore {
       width: input.width,
       height: input.height,
       byteSize: input.png.length,
-      createdAt: now(),
-      updatedAt: now(),
+      createdAt: this.now(),
+      updatedAt: this.now(),
       pinned: false,
       copyCount: 1
     };
@@ -152,7 +171,7 @@ export class HistoryStore {
     }
 
     item.pinned = pinned;
-    item.updatedAt = now();
+    item.updatedAt = this.now();
     await this.saveMetadata();
     return true;
   }
@@ -215,7 +234,7 @@ export class HistoryStore {
     const hash = hashText(text);
     const existing = this.items.find((item) => item.type === "text" && item.hash === hash);
     if (existing) {
-      existing.updatedAt = now();
+      existing.updatedAt = this.now();
       existing.copyCount += 1;
       await this.saveMetadata();
       return { ok: true, item: await this.toPublicItem(existing) };
@@ -227,8 +246,8 @@ export class HistoryStore {
       type: "text",
       hash,
       contentKey: `${id}.text`,
-      createdAt: now(),
-      updatedAt: now(),
+      createdAt: this.now(),
+      updatedAt: this.now(),
       pinned: false,
       copyCount: 1
     };
@@ -279,15 +298,25 @@ export class HistoryStore {
   }
 
   private async enforceRetention(): Promise<void> {
-    await this.trimUnpinned("text", this.settings.maxTextItems);
-    await this.trimUnpinned("image", this.settings.maxImageItems);
+    await this.removeExpiredItems();
+    await this.trimToMaxItems();
   }
 
-  private async trimUnpinned(type: StoredItem["type"], maxItems: number): Promise<void> {
-    const unpinned = this.items
-      .filter((item) => item.type === type && !item.pinned)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const removed = unpinned.slice(maxItems);
+  private async removeExpiredItems(): Promise<void> {
+    const cutoff = this.currentRetentionCutoff();
+    const removed = this.items.filter((item) => Date.parse(item.updatedAt) < cutoff);
+    if (removed.length === 0) {
+      return;
+    }
+
+    const removedIds = new Set(removed.map((item) => item.id));
+    this.items = this.items.filter((item) => !removedIds.has(item.id));
+    await Promise.all(removed.map((item) => this.deleteContent(item)));
+  }
+
+  private async trimToMaxItems(): Promise<void> {
+    const newest = [...this.items].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const removed = newest.slice(this.settings.maxItems);
     if (removed.length === 0) {
       return;
     }
@@ -331,6 +360,15 @@ export class HistoryStore {
     await mkdir(this.rootDir, { recursive: true });
     await writeFile(this.settingsPath, JSON.stringify(this.settings, null, 2), "utf8");
   }
+
+  private now(): string {
+    return (this.options.now?.() ?? new Date()).toISOString();
+  }
+
+  private currentRetentionCutoff(): number {
+    const current = this.options.now?.() ?? new Date();
+    return current.getTime() - this.settings.retentionDays * 24 * 60 * 60 * 1000;
+  }
 }
 
 function hashText(text: string): string {
@@ -341,6 +379,11 @@ function hashBytes(namespace: string, data: Buffer): string {
   return createHash("sha256").update(namespace).update("\0").update(data).digest("hex");
 }
 
-function now(): string {
-  return new Date().toISOString();
+function parseTime(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }

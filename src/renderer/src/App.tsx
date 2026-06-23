@@ -10,6 +10,8 @@ export function App() {
   const [stats, setStats] = useState<StorageStats | undefined>();
   const [filterType, setFilterType] = useState<HistoryFilterType>("all");
   const [search, setSearch] = useState("");
+  const [fromTime, setFromTime] = useState("");
+  const [toTime, setToTime] = useState("");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [lastAction, setLastAction] = useState("");
 
@@ -19,7 +21,7 @@ export function App() {
       const [nextSettings, nextStats, nextItems] = await Promise.all([
         window.clipHistory.getSettings(),
         window.clipHistory.getStats(),
-        window.clipHistory.list({ type: filterType, search })
+        window.clipHistory.list({ type: filterType, search, from: toIsoTime(fromTime), to: toIsoTime(toTime) })
       ]);
       setSettings(nextSettings);
       setStats(nextStats);
@@ -28,7 +30,7 @@ export function App() {
     } catch {
       setLoadState("error");
     }
-  }, [filterType, search]);
+  }, [filterType, fromTime, search, toTime]);
 
   useEffect(() => {
     void load();
@@ -98,6 +100,14 @@ export function App() {
               </button>
             ))}
           </div>
+          <label className="time-box">
+            <span>从</span>
+            <input type="datetime-local" value={fromTime} onChange={(event) => setFromTime(event.target.value)} />
+          </label>
+          <label className="time-box">
+            <span>到</span>
+            <input type="datetime-local" value={toTime} onChange={(event) => setToTime(event.target.value)} />
+          </label>
         </div>
 
         <div className="status-line">
@@ -199,7 +209,7 @@ export function App() {
 
         <div className="limits">
           <Check size={16} />
-          <span>文本 {settings?.maxTextItems ?? 1000} 条 · 图片 {settings?.maxImageItems ?? 200} 张 · 单图 {formatBytes(settings?.maxImageBytes ?? 0)}</span>
+          <span>最近 {settings?.retentionDays ?? 30} 天 · 最多 {settings?.maxItems ?? 500} 条 · 单图 {formatBytes(settings?.maxImageBytes ?? 0)}</span>
         </div>
       </aside>
     </main>
@@ -225,4 +235,12 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function toIsoTime(value: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return new Date(value).toISOString();
 }

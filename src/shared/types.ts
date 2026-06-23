@@ -30,12 +30,14 @@ export type HistoryItem = TextHistoryItem | ImageHistoryItem;
 export type HistoryQuery = {
   search?: string;
   type?: HistoryFilterType;
+  from?: string;
+  to?: string;
 };
 
 export type AppSettings = {
   captureEnabled: boolean;
-  maxTextItems: number;
-  maxImageItems: number;
+  maxItems: number;
+  retentionDays: number;
   maxTextLength: number;
   maxImageBytes: number;
   hotkey: string;
@@ -72,8 +74,8 @@ export type ClipboardHistoryApi = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   captureEnabled: true,
-  maxTextItems: 1000,
-  maxImageItems: 200,
+  maxItems: 500,
+  retentionDays: 30,
   maxTextLength: 20_000,
   maxImageBytes: 10 * 1024 * 1024,
   hotkey: "Ctrl+Alt+V",
