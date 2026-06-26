@@ -43,6 +43,9 @@
       "out/**/*",
       "!**/*.map"
     ],
+    "extraMetadata": {
+      "author": "Jin-wen-jie"
+    },
     "win": {
       "target": "nsis",
       "icon": "build/icon.ico"
@@ -50,8 +53,10 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "${productName} Setup ${version}.${ext}"
+      "artifactName": "${productName} Setup ${version}.${ext}",
+      "unicode": true
     },
+    "afterPack": "./scripts/afterPack.cjs",
     "publish": {
       "provider": "github",
       "owner": "Jin-wen-jie",
