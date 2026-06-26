@@ -55,6 +55,12 @@ export class HistoryStore {
   private readonly vault: FileContentVault;
   private items: StoredItem[] = [];
   private settings: AppSettings;
+  /** Cache of fully-decrypted HistoryItem keyed by id */
+  private itemCache = new Map<string, HistoryItem>();
+  /** True when the cache is dirty relative to this.items — full rebuild needed */
+  private cacheDirty = false;
+  /** Ids that have been invalidated since last cache rebuild */
+  private invalidatedIds = new Set<string>();
 
   constructor(
     private readonly rootDir: string,
@@ -76,52 +82,54 @@ export class HistoryStore {
   }
 
   async list(query: HistoryQuery = {}): Promise<HistoryItem[]> {
+    // Always check retention even if cached — it may remove items
     const retentionChanged = await this.enforceRetention();
 
     const type = query.type ?? "all";
     const search = query.search?.trim().toLocaleLowerCase();
     const from = parseTime(query.from);
     const to = parseTime(query.to);
+
+    // Rebuild cache from scratch if it's fully dirty
+    if (this.cacheDirty) {
+      await this.rebuildCache();
+    } else if (this.invalidatedIds.size > 0) {
+      // Partial update: re-decrypt only invalidated items
+      await this.partialRebuildCache();
+    }
+
     const visibleItems: HistoryItem[] = [];
-    const unreadableItems: StoredItem[] = [];
+    const unreadableIds: string[] = [];
 
     for (const item of this.sortedItems()) {
-      if (type !== "all" && item.type !== type) {
-        continue;
-      }
+      if (type !== "all" && item.type !== type) continue;
 
-      const publicItem = await this.tryToPublicItem(item);
+      const publicItem = this.itemCache.get(item.id);
       if (!publicItem) {
-        unreadableItems.push(item);
+        // Item was in StoredItem array but couldn't be decrypted — collect for cleanup
+        unreadableIds.push(item.id);
         continue;
       }
 
       const updatedAt = Date.parse(publicItem.updatedAt);
-      if (from !== undefined && updatedAt < from) {
-        continue;
-      }
-
-      if (to !== undefined && updatedAt > to) {
-        continue;
-      }
-
-      if (search && publicItem.type === "text" && !publicItem.text.toLocaleLowerCase().includes(search)) {
-        continue;
-      }
-
-      if (search && publicItem.type === "image") {
-        continue;
-      }
+      if (from !== undefined && updatedAt < from) continue;
+      if (to !== undefined && updatedAt > to) continue;
+      if (search && publicItem.type === "text" && !publicItem.text.toLocaleLowerCase().includes(search)) continue;
+      if (search && publicItem.type === "image") continue;
 
       visibleItems.push(publicItem);
     }
 
-    const hasUnreadable = unreadableItems.length > 0;
-    if (hasUnreadable) {
-      await this.removeItems(unreadableItems);
+    // Clean up any items that failed to decrypt
+    if (unreadableIds.length > 0) {
+      this.items = this.items.filter((item) => !unreadableIds.includes(item.id));
+      for (const id of unreadableIds) {
+        this.itemCache.delete(id);
+      }
+      await this.saveMetadata();
     }
 
-    if (retentionChanged || hasUnreadable) {
+    if (retentionChanged) {
       await this.saveMetadata();
     }
 
@@ -175,6 +183,12 @@ export class HistoryStore {
 
     item.pinned = pinned;
     item.updatedAt = this.now();
+    // Update cache if the item is already cached
+    const cached = this.itemCache.get(id);
+    if (cached) {
+      cached.pinned = pinned;
+      cached.updatedAt = item.updatedAt;
+    }
     await this.saveMetadata();
     return true;
   }
@@ -186,14 +200,42 @@ export class HistoryStore {
     }
 
     this.items = this.items.filter((candidate) => candidate.id !== id);
+    this.itemCache.delete(id);
+    this.invalidatedIds.delete(id);
     await this.deleteContent(item);
     await this.saveMetadata();
     return true;
   }
 
+  async deleteMany(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+
+    const idSet = new Set(ids);
+    const toRemove = this.items.filter((item) => idSet.has(item.id));
+    if (toRemove.length === 0) return 0;
+
+    this.items = this.items.filter((item) => !idSet.has(item.id));
+    // Remove from cache
+    for (const id of ids) {
+      this.itemCache.delete(id);
+      this.invalidatedIds.delete(id);
+    }
+
+    // Delete content files in parallel
+    await Promise.all(toRemove.map((item) => this.deleteContent(item)));
+    await this.saveMetadata();
+    return toRemove.length;
+  }
+
   async clear(type: HistoryFilterType = "all"): Promise<void> {
     const removed = this.items.filter((item) => type === "all" || item.type === type);
+    const removedIds = new Set(removed.map((item) => item.id));
     this.items = this.items.filter((item) => type !== "all" && item.type !== type);
+    // Clear cache for removed items
+    for (const id of removedIds) {
+      this.itemCache.delete(id);
+      this.invalidatedIds.delete(id);
+    }
     await Promise.all(removed.map((item) => this.deleteContent(item)));
     await this.saveMetadata();
   }
@@ -236,11 +278,14 @@ export class HistoryStore {
   // ── Export / Import ──
 
   async exportAsJson(): Promise<string> {
-    const items: HistoryItem[] = [];
-    for (const stored of this.items) {
-      const pub = await this.tryToPublicItem(stored);
-      if (pub) items.push(pub);
+    if (this.cacheDirty) {
+      await this.rebuildCache();
+    } else if (this.invalidatedIds.size > 0) {
+      await this.partialRebuildCache();
     }
+    const items = this.sortedItems()
+      .map((stored) => this.itemCache.get(stored.id))
+      .filter((item): item is HistoryItem => !!item);
     return JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), items });
   }
 
@@ -252,7 +297,6 @@ export class HistoryStore {
     let skipped = 0;
 
     for (const item of data.items) {
-      // Deduplicate by checking existing content
       if (item.type === "text") {
         const hash = hashText(item.text);
         const exists = this.items.find((s) => s.type === "text" && s.hash === hash);
@@ -264,14 +308,14 @@ export class HistoryStore {
         if (result.ok) imported++;
         else skipped++;
       } else if (item.type === "image") {
-        // Image items can't be easily reconstructed from public data (no raw PNG)
-        // Skip image import from JSON backup
         skipped++;
       }
     }
 
     return { imported, skipped };
   }
+
+  // ── Private: Add / Upsert ──
 
   private async addOrUpdateText(text: string): Promise<HistoryResult> {
     const hash = hashText(text);
@@ -300,6 +344,12 @@ export class HistoryStore {
     if (existing) {
       existing.updatedAt = this.now();
       existing.copyCount += 1;
+      // Update cache
+      const cached = this.itemCache.get(existing.id);
+      if (cached) {
+        cached.updatedAt = existing.updatedAt;
+        cached.copyCount = existing.copyCount;
+      }
       await this.saveMetadata();
       return { ok: true, item: await this.toPublicItem(existing) };
     }
@@ -308,10 +358,61 @@ export class HistoryStore {
     const item = createItem(id);
     await writeContent(item);
     this.items.push(item);
+    // Add to cache immediately so list() doesn't re-decrypt
+    try {
+      const pub = await this.toPublicItem(item);
+      this.itemCache.set(id, pub);
+    } catch {
+      // If decryption fails now, list() will treat it as unreadable
+    }
     await this.enforceRetention();
     await this.saveMetadata();
     return { ok: true, item: await this.toPublicItem(item) };
   }
+
+  // ── Private: Cache ──
+
+  /** Fully rebuild the decrypt cache from all StoredItem */
+  private async rebuildCache(): Promise<void> {
+    const map = new Map<string, HistoryItem>();
+    for (const stored of this.items) {
+      try {
+        const pub = await this.toPublicItem(stored);
+        map.set(stored.id, pub);
+      } catch {
+        // Skip unreadable items
+      }
+    }
+    this.itemCache = map;
+    this.cacheDirty = false;
+    this.invalidatedIds.clear();
+  }
+
+  /** Re-decrypt only items whose ids are in invalidatedIds */
+  private async partialRebuildCache(): Promise<void> {
+    for (const id of this.invalidatedIds) {
+      const stored = this.items.find((item) => item.id === id);
+      if (stored) {
+        try {
+          const pub = await this.toPublicItem(stored);
+          this.itemCache.set(id, pub);
+        } catch {
+          this.itemCache.delete(id);
+        }
+      } else {
+        // Item was removed
+        this.itemCache.delete(id);
+      }
+    }
+    this.invalidatedIds.clear();
+  }
+
+  /** Mark an id as needing cache refresh. Call after content changes. */
+  private invalidateCache(id: string): void {
+    this.invalidatedIds.add(id);
+  }
+
+  // ── Private: Conversions ──
 
   private async toPublicItem(item: StoredItem): Promise<HistoryItem> {
     if (item.type === "text") {
@@ -349,15 +450,18 @@ export class HistoryStore {
     }
   }
 
+  // ── Private: Sorting ──
+
   private sortedItems(): StoredItem[] {
     return [...this.items].sort((a, b) => {
       if (a.pinned !== b.pinned) {
         return a.pinned ? -1 : 1;
       }
-
       return b.updatedAt.localeCompare(a.updatedAt);
     });
   }
+
+  // ── Private: Retention ──
 
   private async enforceRetention(): Promise<boolean> {
     const expiredRemoved = await this.removeExpiredItems();
@@ -395,6 +499,10 @@ export class HistoryStore {
 
   private async removeItemsById(removedIds: Set<string>, removed: StoredItem[]): Promise<void> {
     this.items = this.items.filter((item) => !removedIds.has(item.id));
+    for (const id of removedIds) {
+      this.itemCache.delete(id);
+      this.invalidatedIds.delete(id);
+    }
     await Promise.all(removed.map((item) => this.deleteContent(item)));
   }
 
@@ -405,15 +513,62 @@ export class HistoryStore {
     }
   }
 
+  // ── Private: Persistence ──
+
+  /** Debounced save timer handle */
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Number of pending saves — used to ensure the final save always happens */
+  private pendingSaves = 0;
+
+  /**
+   * Persist metadata to disk.
+   * Backs up the old file first for crash recovery, then writes new data.
+   * Uses a debounce to coalesce rapid writes, but always guarantees the last
+   * write completes (the timer resets on each call, and the final tick fires
+   * even when no more calls come).
+   *
+   * The .bak copy is only done when we actually flush (not on every enqueue),
+   * keeping the common case fast.
+   */
   private async saveMetadata(): Promise<void> {
-    await mkdir(this.rootDir, { recursive: true });
-    // Backup the existing file before overwriting
-    try {
-      await copyFile(this.metadataPath, this.metadataPath + ".bak");
-    } catch {
-      // No existing file to back up — OK
+    this.pendingSaves++;
+
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
     }
-    await writeFile(this.metadataPath, JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile), "utf8");
+
+    return new Promise<void>((resolve) => {
+      this.saveTimer = setTimeout(async () => {
+        this.saveTimer = null;
+
+        // Drain all pending saves in one go
+        const count = this.pendingSaves;
+        this.pendingSaves = 0;
+
+        await mkdir(this.rootDir, { recursive: true });
+
+        // One backup per drain cycle (not per mutation)
+        try {
+          await copyFile(this.metadataPath, this.metadataPath + ".bak");
+        } catch {
+          // No existing file to back up — OK
+        }
+
+        const json = JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile);
+        await writeFile(this.metadataPath, json, "utf8");
+
+        // If more saves were requested while we were writing, schedule another flush
+        if (this.pendingSaves > 0) {
+          this.saveTimer = setTimeout(() => {
+            this.saveTimer = null;
+            this.pendingSaves = 0;
+            this.saveMetadata().catch(() => {});
+          }, 200);
+        }
+
+        resolve();
+      }, 200);
+    });
   }
 
   private async loadMetadata(): Promise<void> {
@@ -432,6 +587,8 @@ export class HistoryStore {
         this.items = [];
       }
     }
+    // Cache is stale after loading from disk; rebuild on next list()
+    this.cacheDirty = true;
   }
 
   private async loadSettings(): Promise<void> {

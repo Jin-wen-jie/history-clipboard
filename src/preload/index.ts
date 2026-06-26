@@ -5,6 +5,7 @@ const api: ClipboardHistoryApi = {
   list: (query?: HistoryQuery) => ipcRenderer.invoke("history:list", query),
   copy: (id: string) => ipcRenderer.invoke("history:copy", id),
   delete: (id: string) => ipcRenderer.invoke("history:delete", id),
+  deleteMany: (ids: string[]) => ipcRenderer.invoke("history:deleteMany", ids),
   clear: (type?: HistoryFilterType) => ipcRenderer.invoke("history:clear", type),
   setPinned: (id: string, pinned: boolean) => ipcRenderer.invoke("history:setPinned", id, pinned),
   getSettings: () => ipcRenderer.invoke("settings:get"),

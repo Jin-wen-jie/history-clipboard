@@ -181,6 +181,15 @@ function registerIpc(): void {
       return { ok: false };
     }
   });
+  ipcMain.handle("history:deleteMany", async (_event, ids: string[]) => {
+    try {
+      const count = await store.deleteMany(ids);
+      return { ok: true, count };
+    } catch (error) {
+      console.error("history:deleteMany error:", error);
+      return { ok: false, count: 0 };
+    }
+  });
   ipcMain.handle("history:clear", async (_event, type?: HistoryFilterType) => {
     try {
       await store.clear(type);

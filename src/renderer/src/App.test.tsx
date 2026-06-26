@@ -10,6 +10,7 @@ function mockClipHistory(overrides?: Partial<ClipboardHistoryApi>): ClipboardHis
     list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([]),
     copy: vi.fn<ClipboardHistoryApi["copy"]>().mockResolvedValue({ ok: true }),
     delete: vi.fn<ClipboardHistoryApi["delete"]>().mockResolvedValue({ ok: true }),
+    deleteMany: vi.fn<ClipboardHistoryApi["deleteMany"]>().mockResolvedValue({ ok: true, count: 0 }),
     clear: vi.fn<ClipboardHistoryApi["clear"]>().mockResolvedValue(),
     setPinned: vi.fn<ClipboardHistoryApi["setPinned"]>().mockResolvedValue({ ok: true }),
     getSettings: vi.fn<ClipboardHistoryApi["getSettings"]>().mockResolvedValue(DEFAULT_SETTINGS),

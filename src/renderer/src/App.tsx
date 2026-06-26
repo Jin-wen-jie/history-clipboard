@@ -18,6 +18,7 @@ export function App() {
     setSearch,
     copyItem,
     deleteItem,
+    deleteItems,
     togglePinned,
     updateSettings,
     clearCurrent,
@@ -42,6 +43,7 @@ export function App() {
         onCopy={copyItem}
         onTogglePin={togglePinned}
         onDelete={deleteItem}
+        onDeleteMany={deleteItems}
         onCopyItem={copyItem}
         onAddToast={addToast}
       />

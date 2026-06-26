@@ -64,6 +64,7 @@ export type ClipboardHistoryApi = {
   list(query?: HistoryQuery): Promise<HistoryItem[]>;
   copy(id: string): Promise<{ ok: boolean }>;
   delete(id: string): Promise<{ ok: boolean }>;
+  deleteMany(ids: string[]): Promise<{ ok: boolean; count: number }>;
   clear(type?: HistoryFilterType): Promise<void>;
   setPinned(id: string, pinned: boolean): Promise<{ ok: boolean }>;
   getSettings(): Promise<AppSettings>;

@@ -70,7 +70,8 @@ export function useClipboardHistory() {
     try {
       const result = await window.clipHistory.copy(id);
       setLastAction(result.ok ? "已复制" : "复制失败");
-      await load();
+      // No need to reload — the copy act bumps copyCount, but that's
+      // cosmetic; the next poll will pick it up.
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "复制失败");
     }
@@ -80,16 +81,36 @@ export function useClipboardHistory() {
     try {
       await window.clipHistory.delete(id);
       setLastAction("已删除");
-      await load();
+      // Optimistic local removal — avoid full reload
+      setItems((prev) => prev.filter((item) => item.id !== id));
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+
+  async function deleteItems(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    try {
+      const result = await window.clipHistory.deleteMany(ids);
+      setLastAction(`已删除 ${result.count} 条记录`);
+      // Optimistic local removal
+      const idSet = new Set(ids);
+      setItems((prev) => prev.filter((item) => !idSet.has(item.id)));
+    } catch (error) {
+      setLastAction(error instanceof Error ? error.message : "批量删除失败");
     }
   }
 
   async function togglePinned(item: HistoryItem): Promise<void> {
     try {
       await window.clipHistory.setPinned(item.id, !item.pinned);
-      await load();
+      // Optimistic local update
+      setItems((prev) =>
+        prev.map((candidate) =>
+          candidate.id === item.id ? { ...candidate, pinned: !candidate.pinned } : candidate
+        )
+      );
+      setLastAction(item.pinned ? "已取消置顶" : "已置顶");
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "操作失败");
     }
@@ -98,6 +119,7 @@ export function useClipboardHistory() {
   async function updateSettings(patch: Partial<AppSettings>): Promise<void> {
     try {
       setSettings(await window.clipHistory.updateSettings(patch));
+      // Settings changes can affect retention — reload to be safe
       await load();
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "设置更新失败");
@@ -108,6 +130,7 @@ export function useClipboardHistory() {
     try {
       await window.clipHistory.clear(filterType);
       setLastAction("已清空");
+      // Full reload is OK here since it's a rare operation
       await load();
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "清空失败");
@@ -131,6 +154,7 @@ export function useClipboardHistory() {
     // Actions
     copyItem,
     deleteItem,
+    deleteItems,
     togglePinned,
     updateSettings,
     clearCurrent,

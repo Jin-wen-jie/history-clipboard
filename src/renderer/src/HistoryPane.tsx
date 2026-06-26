@@ -20,6 +20,7 @@ type HistoryPaneProps = {
   onCopy: (id: string) => void;
   onTogglePin: (item: HistoryItem) => void;
   onDelete: (id: string) => void;
+  onDeleteMany: (ids: string[]) => void;
   onCopyItem: (id: string) => void;
   onAddToast: (text: string, type?: "success" | "error" | "info") => void;
 };
@@ -56,6 +57,7 @@ export function HistoryPane({
   onCopy,
   onTogglePin,
   onDelete,
+  onDeleteMany,
   onCopyItem,
   onAddToast
 }: HistoryPaneProps) {
@@ -113,8 +115,9 @@ export function HistoryPane({
         e.preventDefault();
         if (selectedCount > 0) {
           if (window.confirm(`确定要删除选中的 ${selectedCount} 条记录吗？`)) {
-            selectedIds.forEach((id) => onDelete(id));
+            onDeleteMany(Array.from(selectedIds));
             onAddToast(`已删除 ${selectedCount} 条记录`, "info");
+            setSelectedIds(new Set());
           }
         } else if (focusedIndex >= 0 && focusedIndex < items.length) {
           if (window.confirm("确定要删除这条记录吗？")) {
@@ -154,7 +157,7 @@ export function HistoryPane({
   function handleBatchDelete() {
     if (selectedCount === 0) return;
     if (window.confirm(`确定要删除选中的 ${selectedCount} 条记录吗？此操作不可撤销。`)) {
-      selectedIds.forEach((id) => onDelete(id));
+      onDeleteMany(Array.from(selectedIds));
       onAddToast(`已删除 ${selectedCount} 条记录`, "info");
       setSelectedIds(new Set());
     }
