@@ -344,30 +344,31 @@ export class HistoryStore {
     if (existing) {
       existing.updatedAt = this.now();
       existing.copyCount += 1;
-      // Update cache
+      // Update cache in-place instead of re-decrypting from disk
       const cached = this.itemCache.get(existing.id);
       if (cached) {
         cached.updatedAt = existing.updatedAt;
         cached.copyCount = existing.copyCount;
+        await this.saveMetadata();
+        return { ok: true, item: cached };
       }
+      // Not in cache — decrypt once for cache and return value
+      const pub = await this.toPublicItem(existing);
+      this.itemCache.set(existing.id, pub);
       await this.saveMetadata();
-      return { ok: true, item: await this.toPublicItem(existing) };
+      return { ok: true, item: pub };
     }
 
     const id = randomUUID();
     const item = createItem(id);
     await writeContent(item);
     this.items.push(item);
-    // Add to cache immediately so list() doesn't re-decrypt
-    try {
-      const pub = await this.toPublicItem(item);
-      this.itemCache.set(id, pub);
-    } catch {
-      // If decryption fails now, list() will treat it as unreadable
-    }
+    // Decrypt once; cache it and return the same object
+    const pub = await this.toPublicItem(item);
+    this.itemCache.set(id, pub);
     await this.enforceRetention();
     await this.saveMetadata();
-    return { ok: true, item: await this.toPublicItem(item) };
+    return { ok: true, item: pub };
   }
 
   // ── Private: Cache ──

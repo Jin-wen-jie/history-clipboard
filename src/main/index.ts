@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, safeStorage, Tray } from "electron";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,14 +31,22 @@ function loadWindowBounds(): { x?: number; y?: number; width?: number; height?: 
   }
 }
 
+let saveBoundsTimer: ReturnType<typeof setTimeout> | null = null;
+
 function saveWindowBounds(): void {
   if (!mainWindow) return;
-  try {
-    const bounds = mainWindow.getBounds();
-    writeFileSync(windowStatePath(), JSON.stringify(bounds));
-  } catch (error) {
-    console.error("Failed to save window bounds:", error);
-  }
+  // Debounce: coalesce rapid resize/move events into a single async write
+  if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+  saveBoundsTimer = setTimeout(async () => {
+    saveBoundsTimer = null;
+    try {
+      const bounds = mainWindow?.getBounds();
+      if (!bounds) return;
+      await writeFile(windowStatePath(), JSON.stringify(bounds), "utf8");
+    } catch (error) {
+      console.error("Failed to save window bounds:", error);
+    }
+  }, 300);
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
