@@ -10,12 +10,17 @@ type HistoryPaneProps = {
   items: HistoryItem[];
   filterType: HistoryFilterType;
   search: string;
+  dateFrom: string;
+  dateTo: string;
   loadState: LoadState;
   lastAction: string;
   hasSearchQuery: boolean;
   historyListRef: React.RefObject<HTMLElement | null>;
   onFilterChange: (type: HistoryFilterType) => void;
   onSearchChange: (query: string) => void;
+  onDateFromChange: (value: string) => void;
+  onDateToChange: (value: string) => void;
+  onClearDateFilter: () => void;
   onRefresh: () => void;
   onCopy: (id: string) => void;
   onTogglePin: (item: HistoryItem) => void;
@@ -47,12 +52,17 @@ export function HistoryPane({
   items,
   filterType,
   search,
+  dateFrom,
+  dateTo,
   loadState,
   lastAction,
   hasSearchQuery,
   historyListRef,
   onFilterChange,
   onSearchChange,
+  onDateFromChange,
+  onDateToChange,
+  onClearDateFilter,
   onRefresh,
   onCopy,
   onTogglePin,
@@ -63,8 +73,6 @@ export function HistoryPane({
 }: HistoryPaneProps) {
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
   const [listEl, setListEl] = useState<HTMLDivElement | null>(null);
 
   // Context menu state
@@ -214,11 +222,6 @@ export function HistoryPane({
       ]
     : [];
 
-  function clearDateFilter() {
-    setDateFrom("");
-    setDateTo("");
-  }
-
   return (
     <section className="history-pane">
       {/* Top bar */}
@@ -265,17 +268,17 @@ export function HistoryPane({
           <input
             type="date"
             value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
+            onChange={(e) => onDateFromChange(e.target.value)}
             aria-label="开始日期"
           />
           <span style={{ color: "var(--color-text-tertiary)", fontSize: 12, alignSelf: "center" }}>至</span>
           <input
             type="date"
             value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
+            onChange={(e) => onDateToChange(e.target.value)}
             aria-label="结束日期"
           />
-          <button className="icon-button" type="button" title="清除日期筛选" onClick={clearDateFilter} style={{ width: 32, height: 32 }}>
+          <button className="icon-button" type="button" title="清除日期筛选" onClick={onClearDateFilter} style={{ width: 32, height: 32 }}>
             <IconTrash2 size={14} />
           </button>
         </div>

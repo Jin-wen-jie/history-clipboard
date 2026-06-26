@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { IconX } from "./icons";
+import { formatBytes } from "../../shared/format";
 
 type ImagePreviewProps = {
   src: string;
@@ -8,12 +9,6 @@ type ImagePreviewProps = {
   byteSize: number;
   onClose: () => void;
 };
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
 
 export function ImagePreview({ src, width, height, byteSize, onClose }: ImagePreviewProps) {
   useEffect(() => {

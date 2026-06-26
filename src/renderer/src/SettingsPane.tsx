@@ -1,6 +1,7 @@
 import { IconCheck, IconPause, IconPlay, IconSave, IconSettings, IconTrash2 } from "./icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings, StorageStats } from "../../shared/types";
+import { formatBytes } from "../../shared/format";
 
 type SettingsPaneProps = {
   settings: AppSettings | undefined;
@@ -264,8 +265,3 @@ function HotkeyRecorder({ value, onChange }: { value: string; onChange: (v: stri
   );
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}

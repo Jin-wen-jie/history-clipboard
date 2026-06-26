@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { IconClipboard, IconCopy, IconImage, IconPin, IconPinOff, IconTrash2 } from "./icons";
 import type { HistoryItem } from "../../shared/types";
+import { formatBytes } from "../../shared/format";
 
 type HistoryRowProps = {
   item: HistoryItem;
@@ -27,12 +28,6 @@ function formatDate(value: string): string {
   } catch {
     return value;
   }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function highlightText(text: string, query: string): ReactNode {

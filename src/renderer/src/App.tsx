@@ -10,12 +10,17 @@ export function App() {
     stats,
     filterType,
     search,
+    dateFrom,
+    dateTo,
     loadState,
     lastAction,
     imageBytes,
     historyListRef,
     setFilterType,
     setSearch,
+    setDateFrom,
+    setDateTo,
+    clearDateFilter,
     copyItem,
     deleteItem,
     deleteItems,
@@ -33,12 +38,17 @@ export function App() {
         items={items}
         filterType={filterType}
         search={search}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
         loadState={loadState}
         lastAction={lastAction}
         hasSearchQuery={search.trim().length > 0}
         historyListRef={historyListRef}
         onFilterChange={setFilterType}
         onSearchChange={setSearch}
+        onDateFromChange={setDateFrom}
+        onDateToChange={setDateTo}
+        onClearDateFilter={clearDateFilter}
         onRefresh={() => void load()}
         onCopy={copyItem}
         onTogglePin={togglePinned}

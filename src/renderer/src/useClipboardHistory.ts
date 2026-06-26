@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings, HistoryFilterType, HistoryItem, StorageStats } from "../../shared/types";
+import { formatBytes } from "../../shared/format";
 
 export type LoadState = "idle" | "loading" | "error";
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+/** Convert YYYY-MM-DD to an ISO start-of-day string (or undefined if empty) */
+function dateToFrom(dateStr: string): string | undefined {
+  if (!dateStr) return undefined;
+  return `${dateStr}T00:00:00.000Z`;
+}
+
+/** Convert YYYY-MM-DD to an ISO end-of-day string (or undefined if empty) */
+function dateToTo(dateStr: string): string | undefined {
+  if (!dateStr) return undefined;
+  return `${dateStr}T23:59:59.999Z`;
 }
 
 export function useClipboardHistory() {
@@ -16,6 +23,8 @@ export function useClipboardHistory() {
   const [filterType, setFilterType] = useState<HistoryFilterType>("all");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [lastAction, setLastAction] = useState("");
   const historyListRef = useRef<HTMLElement | null>(null);
@@ -37,7 +46,12 @@ export function useClipboardHistory() {
       const [nextSettings, nextStats, nextItems] = await Promise.all([
         window.clipHistory.getSettings(),
         window.clipHistory.getStats(),
-        window.clipHistory.list({ type: filterType, search: debouncedSearch })
+        window.clipHistory.list({
+          type: filterType,
+          search: debouncedSearch,
+          from: dateToFrom(dateFrom),
+          to: dateToTo(dateTo)
+        })
       ]);
       const nextLatestItemId = nextItems[0]?.id;
       const previousLatestItemId = latestItemIdRef.current;
@@ -54,7 +68,7 @@ export function useClipboardHistory() {
       setLastAction(error instanceof Error ? error.message : String(error));
       setLoadState("error");
     }
-  }, [filterType, debouncedSearch]);
+  }, [filterType, debouncedSearch, dateFrom, dateTo]);
 
   useEffect(() => {
     void load();
@@ -70,8 +84,6 @@ export function useClipboardHistory() {
     try {
       const result = await window.clipHistory.copy(id);
       setLastAction(result.ok ? "已复制" : "复制失败");
-      // No need to reload — the copy act bumps copyCount, but that's
-      // cosmetic; the next poll will pick it up.
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "复制失败");
     }
@@ -81,7 +93,6 @@ export function useClipboardHistory() {
     try {
       await window.clipHistory.delete(id);
       setLastAction("已删除");
-      // Optimistic local removal — avoid full reload
       setItems((prev) => prev.filter((item) => item.id !== id));
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "删除失败");
@@ -93,7 +104,6 @@ export function useClipboardHistory() {
     try {
       const result = await window.clipHistory.deleteMany(ids);
       setLastAction(`已删除 ${result.count} 条记录`);
-      // Optimistic local removal
       const idSet = new Set(ids);
       setItems((prev) => prev.filter((item) => !idSet.has(item.id)));
     } catch (error) {
@@ -104,7 +114,6 @@ export function useClipboardHistory() {
   async function togglePinned(item: HistoryItem): Promise<void> {
     try {
       await window.clipHistory.setPinned(item.id, !item.pinned);
-      // Optimistic local update
       setItems((prev) =>
         prev.map((candidate) =>
           candidate.id === item.id ? { ...candidate, pinned: !candidate.pinned } : candidate
@@ -119,7 +128,6 @@ export function useClipboardHistory() {
   async function updateSettings(patch: Partial<AppSettings>): Promise<void> {
     try {
       setSettings(await window.clipHistory.updateSettings(patch));
-      // Settings changes can affect retention — reload to be safe
       await load();
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "设置更新失败");
@@ -130,11 +138,15 @@ export function useClipboardHistory() {
     try {
       await window.clipHistory.clear(filterType);
       setLastAction("已清空");
-      // Full reload is OK here since it's a rare operation
       await load();
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "清空失败");
     }
+  }
+
+  function clearDateFilter(): void {
+    setDateFrom("");
+    setDateTo("");
   }
 
   return {
@@ -144,6 +156,8 @@ export function useClipboardHistory() {
     stats,
     filterType,
     search,
+    dateFrom,
+    dateTo,
     loadState,
     lastAction,
     imageBytes,
@@ -151,6 +165,9 @@ export function useClipboardHistory() {
     // Setters
     setFilterType,
     setSearch,
+    setDateFrom,
+    setDateTo,
+    clearDateFilter,
     // Actions
     copyItem,
     deleteItem,
