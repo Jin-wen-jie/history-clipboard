@@ -27,4 +27,4 @@ jobs:
       - name: Build & publish installer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist -- --publish always
+        run: npx electron-builder --win nsis --publish always
