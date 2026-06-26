@@ -518,58 +518,37 @@ export class HistoryStore {
 
   /** Debounced save timer handle */
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Number of pending saves — used to ensure the final save always happens */
-  private pendingSaves = 0;
 
   /**
-   * Persist metadata to disk.
-   * Backs up the old file first for crash recovery, then writes new data.
-   * Uses a debounce to coalesce rapid writes, but always guarantees the last
-   * write completes (the timer resets on each call, and the final tick fires
-   * even when no more calls come).
+   * Persist metadata to disk in the background.
+   * Returns immediately — the actual write is debounced (200ms coalesce window).
+   * The caller has already updated `this.items` in memory, so the write is
+   * purely for crash-recovery persistence and doesn't block the response.
    *
-   * The .bak copy is only done when we actually flush (not on every enqueue),
-   * keeping the common case fast.
+   * .bak backup is done once per flush cycle, not per enqueue.
    */
   private async saveMetadata(): Promise<void> {
-    this.pendingSaves++;
-
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
     }
 
-    return new Promise<void>((resolve) => {
-      this.saveTimer = setTimeout(async () => {
-        this.saveTimer = null;
-
-        // Drain all pending saves in one go
-        const count = this.pendingSaves;
-        this.pendingSaves = 0;
-
+    // Schedule a background flush; don't await it
+    this.saveTimer = setTimeout(async () => {
+      this.saveTimer = null;
+      try {
         await mkdir(this.rootDir, { recursive: true });
-
         // One backup per drain cycle (not per mutation)
         try {
           await copyFile(this.metadataPath, this.metadataPath + ".bak");
         } catch {
           // No existing file to back up — OK
         }
-
         const json = JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile);
         await writeFile(this.metadataPath, json, "utf8");
-
-        // If more saves were requested while we were writing, schedule another flush
-        if (this.pendingSaves > 0) {
-          this.saveTimer = setTimeout(() => {
-            this.saveTimer = null;
-            this.pendingSaves = 0;
-            this.saveMetadata().catch(() => {});
-          }, 200);
-        }
-
-        resolve();
-      }, 200);
-    });
+      } catch (error) {
+        console.error("saveMetadata failed:", error);
+      }
+    }, 200);
   }
 
   private async loadMetadata(): Promise<void> {
