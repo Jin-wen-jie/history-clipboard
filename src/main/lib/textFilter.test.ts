@@ -17,7 +17,7 @@ describe("shouldRecordText", () => {
   });
 
   test("rejects likely one-time codes when sensitive filtering is enabled", () => {
-    expect(shouldRecordText("492031", { maxTextLength: 20_000, sensitiveFilterEnabled: true })).toEqual({
+    expect(shouldRecordText("49203158", { maxTextLength: 20_000, sensitiveFilterEnabled: true })).toEqual({
       ok: false,
       reason: "sensitive"
     });

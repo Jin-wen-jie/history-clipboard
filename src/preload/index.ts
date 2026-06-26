@@ -10,7 +10,9 @@ const api: ClipboardHistoryApi = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateSettings: (settings: Partial<AppSettings>) => ipcRenderer.invoke("settings:update", settings),
   getStats: () => ipcRenderer.invoke("stats:get"),
-  showWindow: () => ipcRenderer.invoke("window:show")
+  showWindow: () => ipcRenderer.invoke("window:show"),
+  exportHistory: () => ipcRenderer.invoke("history:export"),
+  importHistory: () => ipcRenderer.invoke("history:import")
 };
 
 contextBridge.exposeInMainWorld("clipHistory", api);

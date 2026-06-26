@@ -1,6 +1,6 @@
+import { hashBytes } from "../../shared/hash";
 import type { AppSettings, HistoryResult } from "../../shared/types";
 import type { ImageInput } from "./historyStore";
-import { createHash } from "node:crypto";
 
 export type ClipboardWatcherOptions = {
   getSettings: () => Promise<AppSettings>;
@@ -13,7 +13,11 @@ export type ClipboardWatcherOptions = {
 
 export class ClipboardWatcher {
   private timer?: NodeJS.Timeout;
-  private lastCaptureKey?: string;
+  private lastImageKey?: string;
+  private lastTextKey?: string;
+  private isCapturing = false;
+  // Track if the last text read was empty to avoid re-checking empty clipboard
+  private lastTextWasEmpty = false;
 
   constructor(private readonly options: ClipboardWatcherOptions) {}
 
@@ -23,7 +27,9 @@ export class ClipboardWatcher {
     }
 
     this.timer = setInterval(() => {
-      void this.captureOnce();
+      this.captureOnce().catch((error) => {
+        console.error("Clipboard capture error:", error);
+      });
     }, this.options.intervalMs ?? 700);
   }
 
@@ -37,34 +43,55 @@ export class ClipboardWatcher {
   }
 
   async captureOnce(): Promise<void> {
-    const settings = await this.options.getSettings();
-    if (!settings.captureEnabled) {
+    // Prevent concurrent polls from running at the same time
+    if (this.isCapturing) {
       return;
     }
 
-    const image = this.options.readImage();
-    if (image) {
-      const captureKey = hashCapture("image", image.png);
-      if (this.lastCaptureKey === captureKey) {
+    this.isCapturing = true;
+    try {
+      const settings = await this.options.getSettings();
+      if (!settings.captureEnabled) {
         return;
       }
 
-      await this.options.addImage(image);
-      this.lastCaptureKey = captureKey;
-      return;
-    }
+      // --- Step 1: Capture image if changed ---
+      const image = this.options.readImage();
+      if (image) {
+        const imageKey = hashBytes("image", image.png);
+        if (this.lastImageKey !== imageKey) {
+          const result = await this.options.addImage(image);
+          if (result.ok) {
+            this.lastImageKey = imageKey;
+          }
+        }
+      } else {
+        // No image on clipboard — reset image key so a new image can be captured
+        this.lastImageKey = undefined;
+      }
 
-    const text = this.options.readText();
-    const captureKey = hashCapture("text", Buffer.from(text, "utf8"));
-    if (this.lastCaptureKey === captureKey) {
-      return;
-    }
+      // --- Step 2: Capture text if changed (independent of image) ---
+      const text = this.options.readText();
+      if (text.length === 0) {
+        // File copy or empty clipboard — don't update lastTextKey to avoid poisoning
+        this.lastTextWasEmpty = true;
+        return;
+      }
 
-    await this.options.addText(text);
-    this.lastCaptureKey = captureKey;
+      const textKey = hashBytes("text", Buffer.from(text, "utf8"));
+      if (this.lastTextKey === textKey) {
+        return;
+      }
+
+      const result = await this.options.addText(text);
+      if (result.ok) {
+        this.lastTextKey = textKey;
+        this.lastTextWasEmpty = false;
+      }
+      // If addText rejected it (sensitive, too-large, etc.), lastTextKey is NOT updated
+      // so the next poll will try again (useful if settings change)
+    } finally {
+      this.isCapturing = false;
+    }
   }
-}
-
-function hashCapture(type: "text" | "image", data: Buffer): string {
-  return createHash("sha256").update(type).update("\0").update(data).digest("hex");
 }

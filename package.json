@@ -13,7 +13,7 @@
     "dist": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
-    "lucide-react": "^0.475.0",
+    "electron-updater": "^6.8.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -40,14 +40,23 @@
       "output": "release"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "!**/*.map"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Jin-wen-jie",
+      "repo": "history-clipboard",
+      "releaseType": "release"
     }
   }
 }

@@ -1,10 +1,13 @@
-import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, safeStorage, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, safeStorage, Tray } from "electron";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryQuery } from "../shared/types";
 import { ClipboardWatcher } from "./lib/clipboardWatcher";
 import { HistoryStore, type ImageInput } from "./lib/historyStore";
 import { SafeStorageKeyProvider } from "./lib/secureVault";
+import { autoUpdater } from "electron-updater";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
@@ -13,6 +16,30 @@ let tray: Tray | undefined;
 let store: HistoryStore;
 let watcher: ClipboardWatcher;
 let isQuitting = false;
+
+function windowStatePath(): string {
+  return join(app.getPath("userData"), "window-state.json");
+}
+
+function loadWindowBounds(): { x?: number; y?: number; width?: number; height?: number } {
+  try {
+    const path = windowStatePath();
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveWindowBounds(): void {
+  if (!mainWindow) return;
+  try {
+    const bounds = mainWindow.getBounds();
+    writeFileSync(windowStatePath(), JSON.stringify(bounds));
+  } catch (error) {
+    console.error("Failed to save window bounds:", error);
+  }
+}
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -48,15 +75,28 @@ async function bootstrap(): Promise<void> {
   });
   watcher.start();
 
-  mainWindow?.show();
+  // Don't show window if app auto-started (launchAtStartup) — stay in tray
+  const settings = await store.getSettings();
+  if (!settings.launchAtStartup) {
+    mainWindow?.show();
+  }
+
+  // Auto-updater
+  autoUpdater.logger = console;
+  autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+    console.error("Auto-update check failed:", error);
+  });
 }
 
 function createWindow(): void {
+  const savedBounds = loadWindowBounds();
   mainWindow = new BrowserWindow({
-    width: 980,
-    height: 700,
+    width: savedBounds.width ?? 980,
+    height: savedBounds.height ?? 700,
     minWidth: 760,
     minHeight: 520,
+    x: savedBounds.x,
+    y: savedBounds.y,
     title: "历史剪贴板",
     show: false,
     backgroundColor: "#f3f5f2",
@@ -74,10 +114,17 @@ function createWindow(): void {
     }
   });
 
+  mainWindow.on("resize", saveWindowBounds);
+  mainWindow.on("move", saveWindowBounds);
+
   if (process.env.ELECTRON_RENDERER_URL) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL).catch((error) => {
+      console.error("Failed to load renderer URL:", error);
+    });
   } else {
-    void mainWindow.loadFile(join(currentDir, "../renderer/index.html"));
+    mainWindow.loadFile(join(currentDir, "../renderer/index.html")).catch((error) => {
+      console.error("Failed to load renderer file:", error);
+    });
   }
 }
 
@@ -118,24 +165,113 @@ function refreshTrayMenu(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle("history:list", (_event, query?: HistoryQuery) => store.list(query));
-  ipcMain.handle("history:delete", async (_event, id: string) => ({ ok: await store.delete(id) }));
+  ipcMain.handle("history:list", async (_event, query?: HistoryQuery) => {
+    try {
+      return await store.list(query);
+    } catch (error) {
+      console.error("history:list error:", error);
+      return [];
+    }
+  });
+  ipcMain.handle("history:delete", async (_event, id: string) => {
+    try {
+      return { ok: await store.delete(id) };
+    } catch (error) {
+      console.error("history:delete error:", error);
+      return { ok: false };
+    }
+  });
   ipcMain.handle("history:clear", async (_event, type?: HistoryFilterType) => {
-    await store.clear(type);
+    try {
+      await store.clear(type);
+    } catch (error) {
+      console.error("history:clear error:", error);
+    }
   });
-  ipcMain.handle("history:setPinned", async (_event, id: string, pinned: boolean) => ({
-    ok: await store.setPinned(id, pinned)
-  }));
-  ipcMain.handle("history:copy", async (_event, id: string) => copyHistoryItem(id));
-  ipcMain.handle("settings:get", () => store.getSettings());
+  ipcMain.handle("history:setPinned", async (_event, id: string, pinned: boolean) => {
+    try {
+      return { ok: await store.setPinned(id, pinned) };
+    } catch (error) {
+      console.error("history:setPinned error:", error);
+      return { ok: false };
+    }
+  });
+  ipcMain.handle("history:copy", async (_event, id: string) => {
+    try {
+      return await copyHistoryItem(id);
+    } catch (error) {
+      console.error("history:copy error:", error);
+      return { ok: false };
+    }
+  });
+  ipcMain.handle("settings:get", async () => {
+    try {
+      return await store.getSettings();
+    } catch (error) {
+      console.error("settings:get error:", error);
+      return DEFAULT_SETTINGS;
+    }
+  });
   ipcMain.handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
-    const settings = await store.updateSettings(patch);
-    await applySystemSettings(settings);
-    refreshTrayMenu();
-    return settings;
+    try {
+      const settings = await store.updateSettings(patch);
+      await applySystemSettings(settings);
+      refreshTrayMenu();
+      return settings;
+    } catch (error) {
+      console.error("settings:update error:", error);
+      return await store.getSettings();
+    }
   });
-  ipcMain.handle("stats:get", () => store.getStats());
-  ipcMain.handle("window:show", () => showWindow());
+  ipcMain.handle("stats:get", async () => {
+    try {
+      return store.getStats();
+    } catch (error) {
+      console.error("stats:get error:", error);
+      return { totalItems: 0, textItems: 0, imageItems: 0, imageBytes: 0 };
+    }
+  });
+  ipcMain.handle("window:show", async () => {
+    try {
+      showWindow();
+    } catch (error) {
+      console.error("window:show error:", error);
+    }
+  });
+
+  ipcMain.handle("history:export", async () => {
+    try {
+      const json = await store.exportAsJson();
+      const { filePath } = await dialog.showSaveDialog(mainWindow!, {
+        title: "导出剪贴板历史",
+        defaultPath: `剪贴板备份-${new Date().toISOString().slice(0, 10)}.hcbk`,
+        filters: [{ name: "剪贴板备份", extensions: ["hcbk"] }]
+      });
+      if (!filePath) return { ok: false, reason: "cancelled" };
+      await writeFile(filePath, json, "utf8");
+      return { ok: true };
+    } catch (error) {
+      console.error("history:export error:", error);
+      return { ok: false, reason: "export-failed" };
+    }
+  });
+
+  ipcMain.handle("history:import", async () => {
+    try {
+      const { filePaths } = await dialog.showOpenDialog(mainWindow!, {
+        title: "导入剪贴板历史",
+        filters: [{ name: "剪贴板备份", extensions: ["hcbk"] }],
+        properties: ["openFile"]
+      });
+      if (!filePaths || filePaths.length === 0) return { ok: false, reason: "cancelled" };
+      const json = await readFile(filePaths[0], "utf8");
+      const result = await store.importFromJson(json);
+      return { ok: true, imported: result.imported, skipped: result.skipped };
+    } catch (error) {
+      console.error("history:import error:", error);
+      return { ok: false, reason: "import-failed" };
+    }
+  });
 }
 
 async function copyHistoryItem(id: string): Promise<{ ok: boolean }> {
@@ -155,8 +291,11 @@ async function copyHistoryItem(id: string): Promise<{ ok: boolean }> {
 
 async function applySystemSettings(settings: AppSettings): Promise<void> {
   app.setLoginItemSettings({ openAtLogin: settings.launchAtStartup });
-  globalShortcut.unregisterAll();
-  globalShortcut.register(toElectronAccelerator(settings.hotkey), toggleWindow);
+  globalShortcut.unregister(toElectronAccelerator(settings.hotkey));
+  const registered = globalShortcut.register(toElectronAccelerator(settings.hotkey), toggleWindow);
+  if (!registered) {
+    console.warn(`Failed to register global shortcut: ${settings.hotkey}`);
+  }
 }
 
 function readClipboardImage(): ImageInput | undefined {
@@ -203,7 +342,6 @@ function showWindow(): void {
     mainWindow.restore();
   }
 
-  mainWindow.center();
   mainWindow.show();
   mainWindow.moveTop();
   mainWindow.focus();

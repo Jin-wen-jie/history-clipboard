@@ -70,6 +70,8 @@ export type ClipboardHistoryApi = {
   updateSettings(settings: Partial<AppSettings>): Promise<AppSettings>;
   getStats(): Promise<StorageStats>;
   showWindow(): Promise<void>;
+  exportHistory(): Promise<{ ok: boolean; reason?: string }>;
+  importHistory(): Promise<{ ok: boolean; reason?: string; imported?: number; skipped?: number }>;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {

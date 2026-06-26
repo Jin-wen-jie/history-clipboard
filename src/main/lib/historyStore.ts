@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_SETTINGS, type AppSettings, type ClipboardContent, type HistoryFilterType, type HistoryItem, type HistoryQuery, type HistoryResult, type StorageStats } from "../../shared/types";
+import { hashBytes } from "../../shared/hash";
+import { DEFAULT_SETTINGS, type AppSettings, type ClipboardContent, type HistoryFilterType, type HistoryItem, type HistoryQuery, type HistoryResult, type HistoryType, type StorageStats } from "../../shared/types";
 import type { ContentKeyProvider } from "./secureVault";
 import { FileContentVault } from "./secureVault";
 import { shouldRecordText } from "./textFilter";
@@ -75,8 +76,7 @@ export class HistoryStore {
   }
 
   async list(query: HistoryQuery = {}): Promise<HistoryItem[]> {
-    await this.enforceRetention();
-    await this.saveMetadata();
+    const retentionChanged = await this.enforceRetention();
 
     const type = query.type ?? "all";
     const search = query.search?.trim().toLocaleLowerCase();
@@ -116,8 +116,12 @@ export class HistoryStore {
       visibleItems.push(publicItem);
     }
 
-    if (unreadableItems.length > 0) {
+    const hasUnreadable = unreadableItems.length > 0;
+    if (hasUnreadable) {
       await this.removeItems(unreadableItems);
+    }
+
+    if (retentionChanged || hasUnreadable) {
       await this.saveMetadata();
     }
 
@@ -143,36 +147,24 @@ export class HistoryStore {
     }
 
     const hash = hashBytes("image", input.png);
-    const existing = this.items.find((item) => item.type === "image" && item.hash === hash);
-    if (existing) {
-      existing.updatedAt = this.now();
-      existing.copyCount += 1;
-      await this.saveMetadata();
-      return { ok: true, item: await this.toPublicItem(existing) };
-    }
-
-    const id = randomUUID();
-    const item: StoredImageItem = {
-      id,
-      type: "image",
-      hash,
-      contentKey: `${id}.image`,
-      thumbnailKey: `${id}.thumb`,
-      width: input.width,
-      height: input.height,
-      byteSize: input.png.length,
-      createdAt: this.now(),
-      updatedAt: this.now(),
-      pinned: false,
-      copyCount: 1
-    };
-
-    await this.vault.write(item.contentKey, input.png);
-    await this.vault.write(item.thumbnailKey, input.thumbnailPng);
-    this.items.push(item);
-    await this.enforceRetention();
-    await this.saveMetadata();
-    return { ok: true, item: await this.toPublicItem(item) };
+    return this.upsertItem(hash, "image",
+      (id) => ({
+        id, type: "image" as const, hash,
+        contentKey: `${id}.image`,
+        thumbnailKey: `${id}.thumb`,
+        width: input.width,
+        height: input.height,
+        byteSize: input.png.length,
+        createdAt: this.now(),
+        updatedAt: this.now(),
+        pinned: false,
+        copyCount: 1
+      }),
+      async (item) => {
+        await this.vault.write(item.contentKey, input.png);
+        await this.vault.write(item.thumbnailKey, input.thumbnailPng);
+      }
+    );
   }
 
   async setPinned(id: string, pinned: boolean): Promise<boolean> {
@@ -241,9 +233,70 @@ export class HistoryStore {
     };
   }
 
+  // ── Export / Import ──
+
+  async exportAsJson(): Promise<string> {
+    const items: HistoryItem[] = [];
+    for (const stored of this.items) {
+      const pub = await this.tryToPublicItem(stored);
+      if (pub) items.push(pub);
+    }
+    return JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), items });
+  }
+
+  async importFromJson(json: string): Promise<{ imported: number; skipped: number }> {
+    const data = JSON.parse(json) as { version?: number; items: HistoryItem[] };
+    if (!Array.isArray(data.items)) throw new Error("Invalid backup format");
+
+    let imported = 0;
+    let skipped = 0;
+
+    for (const item of data.items) {
+      // Deduplicate by checking existing content
+      if (item.type === "text") {
+        const hash = hashText(item.text);
+        const exists = this.items.find((s) => s.type === "text" && s.hash === hash);
+        if (exists) {
+          skipped++;
+          continue;
+        }
+        const result = await this.addText(item.text);
+        if (result.ok) imported++;
+        else skipped++;
+      } else if (item.type === "image") {
+        // Image items can't be easily reconstructed from public data (no raw PNG)
+        // Skip image import from JSON backup
+        skipped++;
+      }
+    }
+
+    return { imported, skipped };
+  }
+
   private async addOrUpdateText(text: string): Promise<HistoryResult> {
     const hash = hashText(text);
-    const existing = this.items.find((item) => item.type === "text" && item.hash === hash);
+    return this.upsertItem(hash, "text",
+      (id) => ({
+        id, type: "text" as const, hash,
+        contentKey: `${id}.text`,
+        createdAt: this.now(),
+        updatedAt: this.now(),
+        pinned: false,
+        copyCount: 1
+      }),
+      async (item) => {
+        await this.vault.write(item.contentKey, Buffer.from(text, "utf8"));
+      }
+    );
+  }
+
+  private async upsertItem<T extends StoredItem>(
+    hash: string,
+    type: HistoryType,
+    createItem: (id: string) => T,
+    writeContent: (item: T) => Promise<void>
+  ): Promise<HistoryResult> {
+    const existing = this.items.find((item) => item.type === type && item.hash === hash);
     if (existing) {
       existing.updatedAt = this.now();
       existing.copyCount += 1;
@@ -252,18 +305,8 @@ export class HistoryStore {
     }
 
     const id = randomUUID();
-    const item: StoredTextItem = {
-      id,
-      type: "text",
-      hash,
-      contentKey: `${id}.text`,
-      createdAt: this.now(),
-      updatedAt: this.now(),
-      pinned: false,
-      copyCount: 1
-    };
-
-    await this.vault.write(item.contentKey, Buffer.from(text, "utf8"));
+    const item = createItem(id);
+    await writeContent(item);
     this.items.push(item);
     await this.enforceRetention();
     await this.saveMetadata();
@@ -316,31 +359,34 @@ export class HistoryStore {
     });
   }
 
-  private async enforceRetention(): Promise<void> {
-    await this.removeExpiredItems();
-    await this.trimToMaxItems();
+  private async enforceRetention(): Promise<boolean> {
+    const expiredRemoved = await this.removeExpiredItems();
+    const trimmedRemoved = await this.trimToMaxItems();
+    return expiredRemoved || trimmedRemoved;
   }
 
-  private async removeExpiredItems(): Promise<void> {
+  private async removeExpiredItems(): Promise<boolean> {
     const cutoff = this.currentRetentionCutoff();
     const removed = this.items.filter((item) => Date.parse(item.updatedAt) < cutoff);
     if (removed.length === 0) {
-      return;
+      return false;
     }
 
     const removedIds = new Set(removed.map((item) => item.id));
     await this.removeItemsById(removedIds, removed);
+    return true;
   }
 
-  private async trimToMaxItems(): Promise<void> {
+  private async trimToMaxItems(): Promise<boolean> {
     const newest = [...this.items].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const removed = newest.slice(this.settings.maxItems);
     if (removed.length === 0) {
-      return;
+      return false;
     }
 
     const removedIds = new Set(removed.map((item) => item.id));
     await this.removeItemsById(removedIds, removed);
+    return true;
   }
 
   private async removeItems(items: StoredItem[]): Promise<void> {
@@ -359,18 +405,33 @@ export class HistoryStore {
     }
   }
 
+  private async saveMetadata(): Promise<void> {
+    await mkdir(this.rootDir, { recursive: true });
+    // Backup the existing file before overwriting
+    try {
+      await copyFile(this.metadataPath, this.metadataPath + ".bak");
+    } catch {
+      // No existing file to back up — OK
+    }
+    await writeFile(this.metadataPath, JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile), "utf8");
+  }
+
   private async loadMetadata(): Promise<void> {
     try {
       const parsed = JSON.parse(await readFile(this.metadataPath, "utf8")) as MetadataFile;
       this.items = Array.isArray(parsed.items) ? parsed.items : [];
     } catch {
-      this.items = [];
+      // Main file corrupted — try backup
+      try {
+        const parsed = JSON.parse(await readFile(this.metadataPath + ".bak", "utf8")) as MetadataFile;
+        this.items = Array.isArray(parsed.items) ? parsed.items : [];
+        if (this.items.length > 0) {
+          console.warn("Metadata corrupted, recovered from backup");
+        }
+      } catch {
+        this.items = [];
+      }
     }
-  }
-
-  private async saveMetadata(): Promise<void> {
-    await mkdir(this.rootDir, { recursive: true });
-    await writeFile(this.metadataPath, JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile, null, 2), "utf8");
   }
 
   private async loadSettings(): Promise<void> {
@@ -384,7 +445,12 @@ export class HistoryStore {
 
   private async saveSettings(): Promise<void> {
     await mkdir(this.rootDir, { recursive: true });
-    await writeFile(this.settingsPath, JSON.stringify(this.settings, null, 2), "utf8");
+    try {
+      await copyFile(this.settingsPath, this.settingsPath + ".bak");
+    } catch {
+      // No existing file to back up — OK
+    }
+    await writeFile(this.settingsPath, JSON.stringify(this.settings), "utf8");
   }
 
   private now(): string {
@@ -399,10 +465,6 @@ export class HistoryStore {
 
 function hashText(text: string): string {
   return hashBytes("text", Buffer.from(text, "utf8"));
-}
-
-function hashBytes(namespace: string, data: Buffer): string {
-  return createHash("sha256").update(namespace).update("\0").update(data).digest("hex");
 }
 
 function parseTime(value: string | undefined): number | undefined {

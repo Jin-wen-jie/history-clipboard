@@ -5,6 +5,23 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_SETTINGS, type ClipboardHistoryApi } from "../../shared/types";
 import { App } from "./App";
 
+function mockClipHistory(overrides?: Partial<ClipboardHistoryApi>): ClipboardHistoryApi {
+  return {
+    list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([]),
+    copy: vi.fn<ClipboardHistoryApi["copy"]>().mockResolvedValue({ ok: true }),
+    delete: vi.fn<ClipboardHistoryApi["delete"]>().mockResolvedValue({ ok: true }),
+    clear: vi.fn<ClipboardHistoryApi["clear"]>().mockResolvedValue(),
+    setPinned: vi.fn<ClipboardHistoryApi["setPinned"]>().mockResolvedValue({ ok: true }),
+    getSettings: vi.fn<ClipboardHistoryApi["getSettings"]>().mockResolvedValue(DEFAULT_SETTINGS),
+    updateSettings: vi.fn<ClipboardHistoryApi["updateSettings"]>().mockResolvedValue(DEFAULT_SETTINGS),
+    getStats: vi.fn<ClipboardHistoryApi["getStats"]>().mockResolvedValue({ totalItems: 0, textItems: 0, imageItems: 0, imageBytes: 0 }),
+    showWindow: vi.fn<ClipboardHistoryApi["showWindow"]>().mockResolvedValue(),
+    exportHistory: vi.fn<ClipboardHistoryApi["exportHistory"]>().mockResolvedValue({ ok: true }),
+    importHistory: vi.fn<ClipboardHistoryApi["importHistory"]>().mockResolvedValue({ ok: true, imported: 0, skipped: 0 }),
+    ...overrides
+  };
+}
+
 describe("App", () => {
   const originalClipHistory = window.clipHistory;
 
@@ -14,17 +31,7 @@ describe("App", () => {
 
   test("loads recent clipboard items without a date range by default", async () => {
     const list = vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([]);
-    window.clipHistory = {
-      list,
-      copy: vi.fn(),
-      delete: vi.fn(),
-      clear: vi.fn(),
-      setPinned: vi.fn(),
-      getSettings: vi.fn().mockResolvedValue(DEFAULT_SETTINGS),
-      updateSettings: vi.fn(),
-      getStats: vi.fn().mockResolvedValue({ totalItems: 0, textItems: 0, imageItems: 0, imageBytes: 0 }),
-      showWindow: vi.fn()
-    };
+    window.clipHistory = mockClipHistory({ list });
 
     render(<App />);
 
@@ -55,17 +62,7 @@ describe("App", () => {
     const list = vi.fn<ClipboardHistoryApi["list"]>()
       .mockResolvedValueOnce([oldItem])
       .mockResolvedValue([newItem, oldItem]);
-    window.clipHistory = {
-      list,
-      copy: vi.fn(),
-      delete: vi.fn(),
-      clear: vi.fn(),
-      setPinned: vi.fn(),
-      getSettings: vi.fn().mockResolvedValue(DEFAULT_SETTINGS),
-      updateSettings: vi.fn(),
-      getStats: vi.fn().mockResolvedValue({ totalItems: 2, textItems: 2, imageItems: 0, imageBytes: 0 }),
-      showWindow: vi.fn()
-    };
+    window.clipHistory = mockClipHistory({ list });
     const scrollTo = vi.fn();
     Element.prototype.scrollTo = scrollTo;
 
