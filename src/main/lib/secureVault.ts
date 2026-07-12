@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const MAGIC = Buffer.from("HCB1");
@@ -46,16 +46,23 @@ export class SafeStorageKeyProvider implements ContentKeyProvider {
       throw new Error("System encryption is not available.");
     }
 
+    let encrypted: Buffer;
     try {
-      const encrypted = await readFile(this.keyPath);
-      this.key = Buffer.from(this.protector.decryptString(encrypted), "base64");
-      return this.key;
-    } catch {
-      this.key = randomBytes(KEY_BYTES);
+      encrypted = await readFile(this.keyPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+
+      const key = randomBytes(KEY_BYTES);
       await mkdir(dirname(this.keyPath), { recursive: true });
-      await writeFile(this.keyPath, this.protector.encryptString(this.key.toString("base64")));
-      return this.key;
+      await writeFile(this.keyPath, this.protector.encryptString(key.toString("base64")));
+      this.key = key;
+      return key;
     }
+
+    this.key = Buffer.from(this.protector.decryptString(encrypted), "base64");
+    return this.key;
   }
 }
 
@@ -67,7 +74,14 @@ export class FileContentVault {
 
   async write(id: string, data: Buffer): Promise<void> {
     await mkdir(this.rootDir, { recursive: true });
-    await writeFile(this.pathFor(id), await encrypt(data, await this.keyProvider.getKey()));
+    const encrypted = await encrypt(data, await this.keyProvider.getKey());
+    const handle = await open(this.pathFor(id), "w");
+    try {
+      await handle.writeFile(encrypted);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   }
 
   async read(id: string): Promise<Buffer> {
@@ -80,6 +94,35 @@ export class FileContentVault {
 
   async delete(id: string): Promise<void> {
     await rm(this.pathFor(id), { force: true });
+  }
+
+  async cleanupOrphans(referencedIds: ReadonlySet<string>): Promise<number> {
+    const referencedFiles = new Set(
+      Array.from(referencedIds, (id) => `${safeId(id)}.bin`)
+    );
+
+    let entries;
+    try {
+      entries = await readdir(this.rootDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return 0;
+      }
+      throw error;
+    }
+
+    let removed = 0;
+    for (const entry of entries) {
+      if (
+        entry.isFile() &&
+        entry.name.endsWith(".bin") &&
+        !referencedFiles.has(entry.name)
+      ) {
+        await rm(join(this.rootDir, entry.name), { force: true });
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   private pathFor(id: string): string {
