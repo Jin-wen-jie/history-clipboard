@@ -1,41 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hashBytes } from "../../shared/hash";
 import { DEFAULT_SETTINGS, type AppSettings, type ClipboardContent, type HistoryFilterType, type HistoryItem, type HistoryQuery, type HistoryResult, type HistoryType, type StorageStats } from "../../shared/types";
+import { HistoryMetadataJournal, type StoredImageItem, type StoredItem } from "./historyMetadata";
 import type { ContentKeyProvider } from "./secureVault";
 import { FileContentVault } from "./secureVault";
 import { shouldRecordText } from "./textFilter";
-
-type StoredBase = {
-  id: string;
-  hash: string;
-  createdAt: string;
-  updatedAt: string;
-  pinned: boolean;
-  copyCount: number;
-};
-
-type StoredTextItem = StoredBase & {
-  type: "text";
-  contentKey: string;
-};
-
-type StoredImageItem = StoredBase & {
-  type: "image";
-  contentKey: string;
-  thumbnailKey: string;
-  width: number;
-  height: number;
-  byteSize: number;
-};
-
-type StoredItem = StoredTextItem | StoredImageItem;
-
-type MetadataFile = {
-  version: 1;
-  items: StoredItem[];
-};
 
 type HistoryStoreOptions = {
   now?: () => Date;
@@ -49,10 +20,12 @@ export type ImageInput = {
 };
 
 export class HistoryStore {
-  private readonly metadataPath: string;
   private readonly settingsPath: string;
   private readonly contentDir: string;
   private readonly vault: FileContentVault;
+  private readonly metadata: HistoryMetadataJournal;
+  private revision = 0;
+  private metadataRecoverable = true;
   private items: StoredItem[] = [];
   private settings: AppSettings;
   /** Cache of fully-decrypted HistoryItem keyed by id */
@@ -68,17 +41,26 @@ export class HistoryStore {
     initialSettings: AppSettings = DEFAULT_SETTINGS,
     private readonly options: HistoryStoreOptions = {}
   ) {
-    this.metadataPath = join(rootDir, "history.json");
     this.settingsPath = join(rootDir, "settings.json");
     this.contentDir = join(rootDir, "content");
     this.vault = new FileContentVault(this.contentDir, keyProvider);
+    this.metadata = new HistoryMetadataJournal(rootDir);
     this.settings = { ...DEFAULT_SETTINGS, ...initialSettings };
   }
 
   async init(): Promise<void> {
+    const contentExistedBeforeInit = await pathExists(this.contentDir);
     await mkdir(this.contentDir, { recursive: true });
     await this.loadSettings();
-    await this.loadMetadata();
+    const loaded = await this.metadata.load();
+    this.items = loaded.items;
+    this.revision = loaded.revision;
+    this.metadataRecoverable = loaded.validCandidate || (!loaded.hadCandidates && !contentExistedBeforeInit);
+    this.cacheDirty = true;
+  }
+
+  async flush(): Promise<void> {
+    await this.metadata.flush();
   }
 
   async list(query: HistoryQuery = {}): Promise<HistoryItem[]> {
@@ -516,50 +498,8 @@ export class HistoryStore {
 
   // ── Private: Persistence ──
 
-  /** Serialises metadata writes so callers can wait for their mutation to hit disk. */
-  private saveChain: Promise<void> = Promise.resolve();
-
-  /**
-   * Persist metadata to disk before resolving. A successful add/update/delete
-   * should be readable by a freshly constructed store immediately afterwards.
-   */
-  private saveMetadata(): Promise<void> {
-    const json = JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile);
-    const save = this.saveChain.then(async () => {
-      await mkdir(this.rootDir, { recursive: true });
-      try {
-        await copyFile(this.metadataPath, this.metadataPath + ".bak");
-      } catch {
-        // No existing file to back up — OK
-      }
-      await writeFile(this.metadataPath, json, "utf8");
-    });
-
-    this.saveChain = save.catch((error) => {
-      console.error("saveMetadata failed:", error);
-    });
-
-    return save;
-  }
-
-  private async loadMetadata(): Promise<void> {
-    try {
-      const parsed = JSON.parse(await readFile(this.metadataPath, "utf8")) as MetadataFile;
-      this.items = Array.isArray(parsed.items) ? parsed.items : [];
-    } catch {
-      // Main file corrupted — try backup
-      try {
-        const parsed = JSON.parse(await readFile(this.metadataPath + ".bak", "utf8")) as MetadataFile;
-        this.items = Array.isArray(parsed.items) ? parsed.items : [];
-        if (this.items.length > 0) {
-          console.warn("Metadata corrupted, recovered from backup");
-        }
-      } catch {
-        this.items = [];
-      }
-    }
-    // Cache is stale after loading from disk; rebuild on next list()
-    this.cacheDirty = true;
+  private async saveMetadata(): Promise<void> {
+    this.revision = await this.metadata.save(this.items);
   }
 
   private async loadSettings(): Promise<void> {
@@ -602,4 +542,16 @@ function parseTime(value: string | undefined): number | undefined {
 
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }

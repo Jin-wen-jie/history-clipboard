@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -59,6 +59,29 @@ describe("HistoryStore", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("continues revisions from the latest recovered metadata candidate", async () => {
+    const added = await store.addText("alpha");
+    expect(added.ok).toBe(true);
+
+    const main = JSON.parse(await readFile(join(dir, "history.json"), "utf8"));
+    expect(main.revision).toBe(1);
+    const recoveredId = main.items[0].id;
+    await writeFile(join(dir, "history.json.tmp"), JSON.stringify({
+      ...main,
+      revision: 3,
+      items: [{ ...main.items[0], pinned: true }]
+    }), "utf8");
+
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+
+    expect((await reloaded.list())[0]).toMatchObject({ id: recoveredId, pinned: true });
+    expect(JSON.parse(await readFile(join(dir, "history.json"), "utf8")).revision).toBe(3);
+    await reloaded.setPinned(recoveredId, false);
+    await reloaded.flush();
+    expect(JSON.parse(await readFile(join(dir, "history.json"), "utf8")).revision).toBe(4);
   });
 
   test("keeps only the newest entries across text and images", async () => {
