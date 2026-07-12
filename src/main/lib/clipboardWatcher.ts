@@ -21,10 +21,9 @@ type ClipboardSnapshot = {
  * Polls clipboard content at a fixed interval and persists changes.
  *
  * Architecture:
- *   - A lightweight timer reads the clipboard text (very cheap) at `intervalMs`.
- *   - When text differs from the last poll, a full snapshot (text + image) is
- *     read synchronously and queued behind a single-consumer Promise tail so
- *     that `addImage` / `addText` calls are serialised.
+ *   - A timer reads a full clipboard snapshot (text + image) at `intervalMs`.
+ *   - Each snapshot is queued behind a single-consumer Promise tail so that
+ *     `addImage` / `addText` calls are serialised.
  *   - Content-hash deduplication prevents duplicate entries; identical content
  *     copied again updates the existing entry's timestamp via HistoryStore.
  *   - There is no child process, no Win32 FFI, and no IPC — the polling uses
@@ -35,8 +34,6 @@ export class ClipboardWatcher {
   private timer?: ReturnType<typeof setInterval>;
   private lastImageKey?: string;
   private lastTextKey?: string;
-  /** Last text value seen by the poll, used as a cheap pre-check. */
-  private lastPolledText: string | undefined;
   /** Serial execution tail — each capture waits for the previous one. */
   private tail: Promise<void> = Promise.resolve();
   /** Number of captures currently enqueued (used for backpressure). */
@@ -103,23 +100,10 @@ export class ClipboardWatcher {
   // ── Private ──
 
   /**
-   * Lightweight poll: compares text content as a cheap change-detection step.
-   * Only reads the full (text + image) snapshot when the text has changed.
-   *
-   * This avoids calling readImage() on every tick — images are still captured
-   * when they accompany changed text, which is the vast majority of real-world
-   * clipboard operations. The edge case of two image-only copies with identical
-   * empty text is extremely rare and would require additional format enumeration
-   * that would defeat the purpose of a lightweight check.
+   * Poll a full snapshot every tick. Reading image data is a bit heavier than
+   * checking text only, but text-only polling misses image-only copies.
    */
   private poll(): void {
-    const text = this.options.readText();
-
-    if (text === this.lastPolledText) {
-      return; // Nothing changed — skip the expensive full snapshot
-    }
-
-    this.lastPolledText = text;
     void this.captureOnce().catch((error) => {
       console.error("Clipboard capture error (poll):", error);
     });

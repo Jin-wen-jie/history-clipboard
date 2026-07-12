@@ -20,12 +20,14 @@ const settings: AppSettings = {
 describe("HistoryStore", () => {
   let dir: string;
   let store: HistoryStore;
+  let keyProvider: MemoryKeyProvider;
   let currentTime: Date;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "history-clipboard-"));
     currentTime = new Date("2026-06-23T12:00:00.000Z");
-    store = new HistoryStore(dir, new MemoryKeyProvider(), settings, { now: () => currentTime });
+    keyProvider = new MemoryKeyProvider(Buffer.alloc(32, 7));
+    store = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
     await store.init();
   });
 
@@ -41,6 +43,17 @@ describe("HistoryStore", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ type: "text", text: "alpha", copyCount: 2 });
+  });
+
+  test("persists metadata before addText resolves", async () => {
+    await store.addText("alpha");
+
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+
+    const items = await reloaded.list();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ type: "text", text: "alpha" });
   });
 
   test("keeps only the newest entries across text and images", async () => {

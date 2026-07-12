@@ -516,39 +516,30 @@ export class HistoryStore {
 
   // ── Private: Persistence ──
 
-  /** Debounced save timer handle */
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Serialises metadata writes so callers can wait for their mutation to hit disk. */
+  private saveChain: Promise<void> = Promise.resolve();
 
   /**
-   * Persist metadata to disk in the background.
-   * Returns immediately — the actual write is debounced (200ms coalesce window).
-   * The caller has already updated `this.items` in memory, so the write is
-   * purely for crash-recovery persistence and doesn't block the response.
-   *
-   * .bak backup is done once per flush cycle, not per enqueue.
+   * Persist metadata to disk before resolving. A successful add/update/delete
+   * should be readable by a freshly constructed store immediately afterwards.
    */
-  private async saveMetadata(): Promise<void> {
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
-    }
-
-    // Schedule a background flush; don't await it
-    this.saveTimer = setTimeout(async () => {
-      this.saveTimer = null;
+  private saveMetadata(): Promise<void> {
+    const json = JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile);
+    const save = this.saveChain.then(async () => {
+      await mkdir(this.rootDir, { recursive: true });
       try {
-        await mkdir(this.rootDir, { recursive: true });
-        // One backup per drain cycle (not per mutation)
-        try {
-          await copyFile(this.metadataPath, this.metadataPath + ".bak");
-        } catch {
-          // No existing file to back up — OK
-        }
-        const json = JSON.stringify({ version: 1, items: this.items } satisfies MetadataFile);
-        await writeFile(this.metadataPath, json, "utf8");
-      } catch (error) {
-        console.error("saveMetadata failed:", error);
+        await copyFile(this.metadataPath, this.metadataPath + ".bak");
+      } catch {
+        // No existing file to back up — OK
       }
-    }, 200);
+      await writeFile(this.metadataPath, json, "utf8");
+    });
+
+    this.saveChain = save.catch((error) => {
+      console.error("saveMetadata failed:", error);
+    });
+
+    return save;
   }
 
   private async loadMetadata(): Promise<void> {

@@ -87,6 +87,42 @@ describe("ClipboardWatcher", () => {
     expect(addImage).toHaveBeenCalledTimes(1);
   });
 
+  test("poll captures image-only clipboard changes when text is unchanged", async () => {
+    const firstImage = {
+      png: Buffer.from([1]),
+      thumbnailPng: Buffer.from([1]),
+      width: 1,
+      height: 1
+    };
+    const secondImage = {
+      png: Buffer.from([2]),
+      thumbnailPng: Buffer.from([2]),
+      width: 1,
+      height: 1
+    };
+    let image = firstImage;
+    const addImage = vi.fn().mockResolvedValue({ ok: true });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => "",
+      readImage: () => image,
+      addText: vi.fn(),
+      addImage
+    });
+
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.drain();
+    expect(addImage).toHaveBeenCalledWith(firstImage);
+
+    addImage.mockClear();
+    image = secondImage;
+
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.drain();
+
+    expect(addImage).toHaveBeenCalledWith(secondImage);
+  });
+
   test("retries rejected text on next poll (fixes lastCaptureKey poisoning)", async () => {
     const addText = vi.fn()
       .mockResolvedValueOnce({ ok: false, reason: "sensitive" })
