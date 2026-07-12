@@ -99,11 +99,11 @@ describe("ClipboardWatcher", () => {
       addImage: vi.fn()
     });
 
-    // First poll: rejected as sensitive → lastTextKey NOT updated
+    // First call: rejected as sensitive → lastTextKey NOT updated
     await watcher.captureOnce();
     expect(addText).toHaveBeenCalledTimes(1);
 
-    // Second poll: same text still on clipboard → retried because lastTextKey wasn't set
+    // Second call: same text still on clipboard → retried because lastTextKey wasn't set
     await watcher.captureOnce();
     expect(addText).toHaveBeenCalledTimes(2);
   });
@@ -124,38 +124,139 @@ describe("ClipboardWatcher", () => {
     expect(addText).not.toHaveBeenCalled();
   });
 
-  test("skips concurrent poll when previous capture is still running", async () => {
-    let resolveImage: () => void;
-    const imagePromise = new Promise<{ ok: true }>((resolve) => {
-      resolveImage = () => resolve({ ok: true });
+  test("serialises rapid captures while preserving each snapshot", async () => {
+    let clipboardText = "A";
+    let releaseFirst: () => void;
+    const firstPersisted = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
     });
-    const addImage = vi.fn().mockReturnValue(imagePromise);
-    const image = {
-      png: Buffer.from([1, 2, 3]),
-      thumbnailPng: Buffer.from([9]),
-      width: 16,
-      height: 9
-    };
-
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const persisted: string[] = [];
+    const addText = vi.fn(async (text: string) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      if (text === "A") {
+        await firstPersisted;
+      }
+      persisted.push(text);
+      inFlight -= 1;
+      return {
+        ok: true as const,
+        item: {
+          id: text,
+          type: "text" as const,
+          text,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          updatedAt: "2026-07-12T00:00:00.000Z",
+          pinned: false,
+          copyCount: 1
+        }
+      };
+    });
     const watcher = new ClipboardWatcher({
       getSettings: async () => DEFAULT_SETTINGS,
-      readText: () => "",
-      readImage: () => image,
-      addText: vi.fn(),
-      addImage
+      readText: () => clipboardText,
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
     });
 
-    // Start first capture (won't complete until we resolve the promise)
-    const firstCapture = watcher.captureOnce();
+    // First capture reads "A", second reads "B" (snapshot taken at call time)
+    const first = watcher.captureOnce();
+    clipboardText = "B";
+    const second = watcher.captureOnce();
 
-    // Try second capture while first is still running
+    // First should start processing immediately (pendingCaptures goes 0→1)
+    await vi.waitFor(() => expect(addText).toHaveBeenCalledTimes(1));
+    expect(addText).toHaveBeenLastCalledWith("A");
+
+    // Release the first capture so the second can proceed
+    releaseFirst!();
+    await Promise.all([first, second]);
+
+    expect(persisted).toEqual(["A", "B"]);
+    expect(maxInFlight).toBe(1);
+  });
+
+  test("deduplicates unchanged content", async () => {
+    const addText = vi.fn().mockResolvedValue({ ok: true });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => "unchanged",
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
+    });
+
+    await watcher.captureOnce();
     await watcher.captureOnce();
 
-    // Second capture should have been skipped
-    expect(addImage).toHaveBeenCalledTimes(1);
+    expect(addText).toHaveBeenCalledTimes(1);
+  });
 
-    // Clean up
-    resolveImage!();
-    await firstCapture;
+  test("recovers after a synchronous clipboard read failure", async () => {
+    const addText = vi.fn().mockResolvedValue({ ok: true });
+    let shouldFail = true;
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => {
+        if (shouldFail) {
+          shouldFail = false;
+          throw new Error("clipboard read failed");
+        }
+        return "recovered";
+      },
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
+    });
+
+    await expect(watcher.captureOnce()).rejects.toThrow("clipboard read failed");
+    await watcher.captureOnce();
+
+    expect(addText).toHaveBeenCalledWith("recovered");
+  });
+
+  test("captures the initial clipboard snapshot when started", async () => {
+    const addText = vi.fn().mockResolvedValue({ ok: true });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => "already present",
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn(),
+      intervalMs: 60_000
+    });
+
+    watcher.start();
+    await watcher.drain();
+    watcher.stop();
+
+    expect(addText).toHaveBeenCalledWith("already present");
+  });
+
+  test("skips poll when text is unchanged", async () => {
+    const addText = vi.fn().mockResolvedValue({ ok: true });
+    const readText = vi.fn().mockReturnValue("same text");
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText,
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
+    });
+
+    // First capture reads and stores
+    await watcher.captureOnce();
+    expect(addText).toHaveBeenCalledTimes(1);
+
+    // Reset readText mock to track calls
+    readText.mockClear();
+
+    // Call captureOnce again — should still work since it doesn't use
+    // lastPolledText (only the internal poll() does)
+    await watcher.captureOnce();
+    expect(addText).toHaveBeenCalledTimes(1); // deduped by content hash
   });
 });
