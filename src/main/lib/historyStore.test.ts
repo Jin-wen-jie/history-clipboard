@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { HistoryStore } from "./historyStore";
 import { MemoryKeyProvider } from "./secureVault";
 import type { AppSettings } from "../../shared/types";
@@ -46,14 +46,19 @@ describe("HistoryStore", () => {
   });
 
   test("persists metadata before addText resolves", async () => {
-    await store.addText("alpha");
+    vi.useFakeTimers();
+    try {
+      await store.addText("alpha");
 
-    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
-    await reloaded.init();
+      const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+      await reloaded.init();
 
-    const items = await reloaded.list();
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ type: "text", text: "alpha" });
+      const items = await reloaded.list();
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ type: "text", text: "alpha" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("keeps only the newest entries across text and images", async () => {

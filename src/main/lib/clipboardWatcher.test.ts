@@ -123,6 +123,33 @@ describe("ClipboardWatcher", () => {
     expect(addImage).toHaveBeenCalledWith(secondImage);
   });
 
+  test("retries a rejected image-only capture on the next poll", async () => {
+    const image = {
+      png: Buffer.from([1]),
+      thumbnailPng: Buffer.from([1]),
+      width: 1,
+      height: 1
+    };
+    const addImage = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "too-large" })
+      .mockResolvedValueOnce({ ok: true });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => "",
+      readImage: () => image,
+      addText: vi.fn(),
+      addImage
+    });
+
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.drain();
+
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.drain();
+
+    expect(addImage).toHaveBeenCalledTimes(2);
+  });
+
   test("retries rejected text on next poll (fixes lastCaptureKey poisoning)", async () => {
     const addText = vi.fn()
       .mockResolvedValueOnce({ ok: false, reason: "sensitive" })
@@ -272,27 +299,29 @@ describe("ClipboardWatcher", () => {
     expect(addText).toHaveBeenCalledWith("already present");
   });
 
-  test("skips poll when text is unchanged", async () => {
+  test("poll reads a full snapshot but deduplicates unchanged content", async () => {
     const addText = vi.fn().mockResolvedValue({ ok: true });
     const readText = vi.fn().mockReturnValue("same text");
+    const readImage = vi.fn().mockReturnValue(undefined);
     const watcher = new ClipboardWatcher({
       getSettings: async () => DEFAULT_SETTINGS,
       readText,
-      readImage: () => undefined,
+      readImage,
       addText,
       addImage: vi.fn()
     });
 
-    // First capture reads and stores
-    await watcher.captureOnce();
-    expect(addText).toHaveBeenCalledTimes(1);
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.drain();
 
-    // Reset readText mock to track calls
     readText.mockClear();
+    readImage.mockClear();
 
-    // Call captureOnce again — should still work since it doesn't use
-    // lastPolledText (only the internal poll() does)
-    await watcher.captureOnce();
-    expect(addText).toHaveBeenCalledTimes(1); // deduped by content hash
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.drain();
+
+    expect(readText).toHaveBeenCalledTimes(1);
+    expect(readImage).toHaveBeenCalledTimes(1);
+    expect(addText).toHaveBeenCalledTimes(1);
   });
 });
