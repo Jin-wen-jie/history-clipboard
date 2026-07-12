@@ -1,5 +1,9 @@
 # Clipboard Capture Reliability Implementation Plan
 
+> **已被替代：** 本计划中的“助手只发送 sequence、Electron 再读取当前剪贴板”无法保存
+> 高速中间态。请改为执行
+> `docs/superpowers/plans/2026-07-12-reliable-background-clipboard-capture.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让 Windows 上每次可观察到的剪贴板变更都立即形成快照、串行加密落盘，并消除静默过滤和退出时元数据未写完造成的记录遗漏。
