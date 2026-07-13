@@ -83,6 +83,20 @@ describe("HistoryMetadataJournal", () => {
     await expect(journal.save([textItem("next")])).resolves.toBe(4);
   });
 
+  test("promotes validated temp without rewriting the recovery source", async () => {
+    await writeCandidate("history.json", { version: 1, revision: 1, items: [textItem("main")] });
+    const tempBytes = `${JSON.stringify({
+      version: 1,
+      revision: 2,
+      items: [textItem("temp")]
+    }, null, 2)}\n`;
+    await writeFile(join(dir, "history.json.tmp"), tempBytes, "utf8");
+
+    await new HistoryMetadataJournal(dir).load();
+
+    expect(await readFile(join(dir, "history.json"), "utf8")).toBe(tempBytes);
+  });
+
   test("loads legacy metadata as revision zero", async () => {
     await writeCandidate("history.json", { version: 1, items: [textItem("legacy")] });
 

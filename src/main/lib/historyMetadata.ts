@@ -91,7 +91,7 @@ export class HistoryMetadataJournal {
     this.revision = selected.metadata.revision;
     const recovered = selected.priority !== 0;
     if (recovered) {
-      await this.promoteSnapshot(selected.metadata);
+      await this.promoteSnapshot(selected);
     }
 
     return {
@@ -132,10 +132,17 @@ export class HistoryMetadataJournal {
     await rename(join(this.rootDir, "history.json.tmp"), mainPath);
   }
 
-  private async promoteSnapshot(snapshot: MetadataFile): Promise<void> {
+  private async promoteSnapshot(candidate: Candidate): Promise<void> {
+    const temporaryPath = join(this.rootDir, "history.json.tmp");
+    const mainPath = join(this.rootDir, "history.json");
+    if (candidate.path === temporaryPath) {
+      await rename(temporaryPath, mainPath);
+      return;
+    }
+
     await mkdir(this.rootDir, { recursive: true });
-    await this.writeTemporarySnapshot(snapshot);
-    await rename(join(this.rootDir, "history.json.tmp"), join(this.rootDir, "history.json"));
+    await this.writeTemporarySnapshot(candidate.metadata);
+    await rename(temporaryPath, mainPath);
   }
 
   private async writeTemporarySnapshot(snapshot: MetadataFile): Promise<void> {
