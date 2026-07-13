@@ -1,12 +1,13 @@
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, safeStorage, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, Tray } from "electron";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryQuery } from "../shared/types";
-import { ClipboardWatcher } from "./lib/clipboardWatcher";
+import { ClipboardRuntime } from "./lib/clipboardRuntime";
 import { HistoryStore, type ImageInput } from "./lib/historyStore";
 import { SafeStorageKeyProvider } from "./lib/secureVault";
+import { ShutdownCoordinator } from "./lib/shutdownCoordinator";
 import {
   SecondInstanceWindowCoordinator,
   StartupManager,
@@ -19,9 +20,9 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let store: HistoryStore;
-let watcher: ClipboardWatcher;
+let runtime: ClipboardRuntime | undefined;
 let startupManager: StartupManager;
-let isQuitting = false;
+let shutdownCoordinator: ShutdownCoordinator | undefined;
 const secondInstanceWindowCoordinator = new SecondInstanceWindowCoordinator();
 
 function windowStatePath(): string {
@@ -56,6 +57,10 @@ function saveWindowBounds(): void {
   }, 300);
 }
 
+app.on("before-quit", (event) => {
+  ensureShutdownCoordinator().handleBeforeQuit(event);
+});
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!gotSingleInstanceLock) {
@@ -64,7 +69,7 @@ if (!gotSingleInstanceLock) {
   app.on("second-instance", (_event, commandLine) => {
     secondInstanceWindowCoordinator.handleSecondInstance(
       commandLine,
-      mainWindow !== undefined,
+      mainWindow !== undefined && !mainWindow.isDestroyed(),
       showWindow
     );
   });
@@ -72,6 +77,9 @@ if (!gotSingleInstanceLock) {
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
+  if (shutdownCoordinator?.isQuitting) {
+    return;
+  }
 
   store = new HistoryStore(
     app.getPath("userData"),
@@ -79,23 +87,37 @@ async function bootstrap(): Promise<void> {
     DEFAULT_SETTINGS
   );
   await store.init();
+  if (shutdownCoordinator?.isQuitting) {
+    return;
+  }
 
   startupManager = new StartupManager(app, store, process.execPath);
   await startupManager.reconcile();
+  if (shutdownCoordinator?.isQuitting) {
+    return;
+  }
+
+  runtime = new ClipboardRuntime({
+    helperPath: app.isPackaged
+      ? join(process.resourcesPath, "clipboard-listener.exe")
+      : join(currentDir, "../../build/clipboard-listener.exe"),
+    watcherOptions: {
+      getSettings: () => store.getSettings(),
+      readText: () => clipboard.readText(),
+      readImage: readClipboardImage,
+      addText: (text) => store.addText(text),
+      addImage: (image) => store.addImage(image)
+    },
+    createImageInput
+  });
+  ensureShutdownCoordinator();
+  powerMonitor.on("resume", () => runtime?.handleSystemResume());
+  runtime.start();
 
   createWindow();
   createTray();
   registerIpc();
   await applyHotkeySettings(await store.getSettings());
-
-  watcher = new ClipboardWatcher({
-    getSettings: () => store.getSettings(),
-    readText: () => clipboard.readText(),
-    readImage: readClipboardImage,
-    addText: (text) => store.addText(text),
-    addImage: (image) => store.addImage(image)
-  });
-  watcher.start();
 
   if (!isLaunchAtLogin(process.argv)) {
     mainWindow?.show();
@@ -128,7 +150,7 @@ function createWindow(): void {
   });
 
   mainWindow.on("close", (event) => {
-    if (!isQuitting) {
+    if (!shutdownCoordinator?.isQuitting) {
       event.preventDefault();
       mainWindow?.hide();
     }
@@ -171,6 +193,7 @@ function refreshTrayMenu(): void {
         click: async () => {
           const settings = await store.getSettings();
           await store.updateSettings({ captureEnabled: !settings.captureEnabled });
+          await runtime?.reconcileAfterSettingsChange();
           refreshTrayMenu();
         }
       },
@@ -178,7 +201,6 @@ function refreshTrayMenu(): void {
       {
         label: "退出",
         click: () => {
-          isQuitting = true;
           app.quit();
         }
       }
@@ -253,6 +275,9 @@ function registerIpc(): void {
       if (typeof launchAtStartup === "boolean") {
         await startupManager.setEnabled(launchAtStartup);
         settings = await store.getSettings();
+      }
+      if (Object.keys(ordinaryPatch).length > 0) {
+        await runtime?.reconcileAfterSettingsChange();
       }
       await applyHotkeySettings(settings);
       refreshTrayMenu();
@@ -348,19 +373,41 @@ function readClipboardImage(): ImageInput | undefined {
   }
 
   const size = image.getSize();
-  const longestSide = Math.max(size.width, size.height, 1);
+  return createImageInput(png, size.width, size.height);
+}
+
+function createImageInput(png: Buffer, width: number, height: number): ImageInput {
+  const image = nativeImage.createFromBuffer(png);
+  const longestSide = Math.max(width, height, 1);
   const scale = Math.min(1, 180 / longestSide);
   const thumbnail = image.resize({
-    width: Math.max(1, Math.round(size.width * scale)),
-    height: Math.max(1, Math.round(size.height * scale))
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale))
   });
 
   return {
     png,
     thumbnailPng: thumbnail.toPNG(),
-    width: size.width,
-    height: size.height
+    width,
+    height
   };
+}
+
+function ensureShutdownCoordinator(): ShutdownCoordinator {
+  shutdownCoordinator ??= new ShutdownCoordinator({
+    stopSupervisor: () => runtime?.stopSupervisor() ?? Promise.resolve(),
+    stopWatcher: () => runtime?.stopWatcher(),
+    drainWatcher: () => runtime?.drain() ?? Promise.resolve(),
+    flushStore: async () => {
+      if (store) {
+        await store.flush();
+      }
+    },
+    unregisterShortcuts: () => globalShortcut.unregisterAll(),
+    quit: () => app.quit(),
+    onError: () => console.error("Application shutdown step failed")
+  });
+  return shutdownCoordinator;
 }
 
 function toggleWindow(): void {
@@ -405,12 +452,6 @@ function createTrayIcon(): Electron.NativeImage {
 
   return nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
 }
-
-app.on("before-quit", () => {
-  isQuitting = true;
-  watcher?.stop();
-  globalShortcut.unregisterAll();
-});
 
 app.on("activate", () => {
   if (!mainWindow) {
