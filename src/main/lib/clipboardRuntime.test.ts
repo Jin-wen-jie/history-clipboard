@@ -1,9 +1,16 @@
 import { describe, expect, test, vi } from "vitest";
-import type { ClipboardBackgroundState } from "../../shared/types";
+import {
+  DEFAULT_SETTINGS,
+  type AppSettings,
+  type ClipboardBackgroundState
+} from "../../shared/types";
 import type { ClipboardAgentSupervisorOptions } from "./clipboardAgentSupervisor";
 import type { NativeClipboardSnapshot } from "./clipboardAgentProtocol";
 import type { ClipboardWatcherOptions } from "./clipboardWatcher";
-import { ClipboardRuntime } from "./clipboardRuntime";
+import {
+  ClipboardRuntime,
+  shouldReconcileAfterSettingsChange
+} from "./clipboardRuntime";
 
 const STOPPED_STATE: ClipboardBackgroundState = {
   mode: "stopped",
@@ -132,6 +139,68 @@ describe("ClipboardRuntime", () => {
 
     expect(harness.watcher.reconcileOnce).toHaveBeenCalledTimes(1);
     expect(harness.watcher.reconcileOnce).toHaveBeenCalledWith({ force: true });
+  });
+
+  test("does not persist fallback content again when the helper becomes ready", async () => {
+    let supervisorOptions!: ClipboardAgentSupervisorOptions;
+    const addText = vi.fn(async (text: string) => ({
+      ok: true as const,
+      item: {
+        id: text,
+        type: "text" as const,
+        text,
+        createdAt: "2026-07-13T00:00:00.000Z",
+        updatedAt: "2026-07-13T00:00:00.000Z",
+        pinned: false,
+        copyCount: 1
+      }
+    }));
+    const supervisor = {
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+      handleSystemResume: vi.fn(),
+      setOutputPaused: vi.fn(),
+      getStatus: vi.fn(() => ({ ...STOPPED_STATE }))
+    };
+    const runtime = new ClipboardRuntime({
+      helperPath: "C:\\app\\clipboard-listener.exe",
+      watcherOptions: {
+        getSettings: async () => DEFAULT_SETTINGS,
+        readImage: () => undefined,
+        readText: () => "A",
+        addImage: vi.fn(),
+        addText,
+        fallbackIntervalMs: 60_000
+      },
+      createImageInput: (png, width, height) => ({
+        png,
+        thumbnailPng: Buffer.alloc(0),
+        width,
+        height
+      }),
+      createSupervisor: (options) => {
+        supervisorOptions = options;
+        return supervisor as never;
+      }
+    });
+
+    runtime.start();
+    try {
+      await runtime.drain();
+      expect(addText).toHaveBeenCalledTimes(1);
+
+      supervisorOptions.onStatusChange({
+        ...STOPPED_STATE,
+        mode: "listening",
+        helperGeneration: 1
+      });
+      await supervisorOptions.onReconcile();
+      await runtime.drain();
+
+      expect(addText).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime.stopProducers();
+    }
   });
 
   test("copies native PNG data, defaults missing text, and awaits capture persistence", async () => {
@@ -267,5 +336,83 @@ describe("ClipboardRuntime", () => {
 
     await harness.runtime.drain();
     expect(harness.watcher.drain).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("shouldReconcileAfterSettingsChange", () => {
+  const settings = (patch: Partial<AppSettings> = {}): AppSettings => ({
+    ...DEFAULT_SETTINGS,
+    ...patch
+  });
+
+  test.each([
+    {
+      name: "capture resumes",
+      before: settings({ captureEnabled: false }),
+      after: settings({ captureEnabled: true }),
+      expected: true
+    },
+    {
+      name: "capture pauses",
+      before: settings({ captureEnabled: true }),
+      after: settings({ captureEnabled: false }),
+      expected: false
+    },
+    {
+      name: "sensitive filtering turns off",
+      before: settings({ sensitiveFilterEnabled: true }),
+      after: settings({ sensitiveFilterEnabled: false }),
+      expected: true
+    },
+    {
+      name: "sensitive filtering turns on",
+      before: settings({ sensitiveFilterEnabled: false }),
+      after: settings({ sensitiveFilterEnabled: true }),
+      expected: false
+    },
+    {
+      name: "text limit changes",
+      before: settings(),
+      after: settings({ maxTextLength: DEFAULT_SETTINGS.maxTextLength + 1 }),
+      expected: true
+    },
+    {
+      name: "image limit changes",
+      before: settings(),
+      after: settings({ maxImageBytes: DEFAULT_SETTINGS.maxImageBytes + 1 }),
+      expected: true
+    },
+    {
+      name: "hotkey changes",
+      before: settings(),
+      after: settings({ hotkey: "Ctrl+Shift+V" }),
+      expected: false
+    },
+    {
+      name: "retention changes",
+      before: settings(),
+      after: settings({ retentionDays: DEFAULT_SETTINGS.retentionDays + 1 }),
+      expected: false
+    },
+    {
+      name: "item limit changes",
+      before: settings(),
+      after: settings({ maxItems: DEFAULT_SETTINGS.maxItems + 1 }),
+      expected: false
+    },
+    {
+      name: "startup setting changes",
+      before: settings(),
+      after: settings({ launchAtStartup: !DEFAULT_SETTINGS.launchAtStartup }),
+      expected: false
+    },
+    {
+      name: "nothing changes",
+      before: settings(),
+      after: settings(),
+      expected: false
+    }
+  ])("returns $expected when $name", ({ before, after, expected }) => {
+    expect(shouldReconcileAfterSettingsChange(before, after)).toBe(expected);
   });
 });

@@ -329,9 +329,12 @@ export class ClipboardWatcher {
 
   private async processSnapshot(item: CaptureQueueItem): Promise<void> {
     const native = item.source === "native";
-    if (item.force || native) {
+    if (native) {
       this.lastImageKey = undefined;
       this.lastTextKey = undefined;
+      this.rejectedImageKey = undefined;
+      this.rejectedTextKey = undefined;
+    } else if (item.force) {
       this.rejectedImageKey = undefined;
       this.rejectedTextKey = undefined;
     }

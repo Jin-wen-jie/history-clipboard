@@ -508,7 +508,7 @@ describe("ClipboardWatcher", () => {
     expect(addText).toHaveBeenCalledTimes(2);
   });
 
-  test("filtered poll fingerprints are suppressed until force clears all keys", async () => {
+  test("force retries a filtered image without repeating accepted text", async () => {
     const image = {
       png: Buffer.from([1, 2]),
       thumbnailPng: Buffer.from([3]),
@@ -539,7 +539,7 @@ describe("ClipboardWatcher", () => {
     await watcher.reconcileOnce({ force: true });
 
     expect(addImage).toHaveBeenCalledTimes(2);
-    expect(addText).toHaveBeenCalledTimes(2);
+    expect(addText).toHaveBeenCalledTimes(1);
     expect(filtered).toEqual(["too-large"]);
   });
 
@@ -950,16 +950,23 @@ describe("ClipboardWatcher", () => {
     expect(addImage).toHaveBeenCalledTimes(2);
   });
 
-  test("retries rejected text only when forced", async () => {
+  test("force retries rejected text without repeating an accepted image", async () => {
+    const image = {
+      png: Buffer.from([4]),
+      thumbnailPng: Buffer.from([5]),
+      width: 1,
+      height: 1
+    };
     const addText = vi.fn()
       .mockResolvedValueOnce({ ok: false, reason: "sensitive" })
       .mockResolvedValueOnce({ ok: true });
+    const addImage = vi.fn().mockResolvedValue({ ok: true });
     const watcher = new ClipboardWatcher({
       getSettings: async () => DEFAULT_SETTINGS,
       readText: () => "token: abc123",
-      readImage: () => undefined,
+      readImage: () => image,
       addText,
-      addImage: vi.fn()
+      addImage
     });
 
     // First call: rejected as sensitive → lastTextKey NOT updated
@@ -972,6 +979,7 @@ describe("ClipboardWatcher", () => {
 
     await watcher.reconcileOnce({ force: true });
     expect(addText).toHaveBeenCalledTimes(2);
+    expect(addImage).toHaveBeenCalledTimes(1);
   });
 
   test("does not pollute text key with empty clipboard", async () => {

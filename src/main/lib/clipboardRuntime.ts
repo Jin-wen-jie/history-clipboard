@@ -1,4 +1,4 @@
-import type { ClipboardBackgroundState } from "../../shared/types";
+import type { AppSettings, ClipboardBackgroundState } from "../../shared/types";
 import {
   ClipboardAgentSupervisor,
   type ClipboardAgentSupervisorOptions
@@ -27,6 +27,18 @@ export type ClipboardRuntimeOptions = {
     options: ClipboardAgentSupervisorOptions
   ) => ClipboardAgentSupervisor;
 };
+
+export function shouldReconcileAfterSettingsChange(
+  before: AppSettings,
+  after: AppSettings
+): boolean {
+  return (
+    (!before.captureEnabled && after.captureEnabled) ||
+    (before.sensitiveFilterEnabled && !after.sensitiveFilterEnabled) ||
+    before.maxTextLength !== after.maxTextLength ||
+    before.maxImageBytes !== after.maxImageBytes
+  );
+}
 
 const INITIAL_STATE: ClipboardBackgroundState = {
   mode: "stopped",

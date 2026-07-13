@@ -4,7 +4,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryQuery } from "../shared/types";
-import { ClipboardRuntime } from "./lib/clipboardRuntime";
+import {
+  ClipboardRuntime,
+  shouldReconcileAfterSettingsChange
+} from "./lib/clipboardRuntime";
 import { HistoryStore, type ImageInput } from "./lib/historyStore";
 import { SafeStorageKeyProvider } from "./lib/secureVault";
 import { ShutdownCoordinator } from "./lib/shutdownCoordinator";
@@ -191,9 +194,11 @@ function refreshTrayMenu(): void {
       {
         label: "暂停/恢复记录",
         click: async () => {
-          const settings = await store.getSettings();
-          await store.updateSettings({ captureEnabled: !settings.captureEnabled });
-          await runtime?.reconcileAfterSettingsChange();
+          const before = await store.getSettings();
+          const after = await store.updateSettings({ captureEnabled: !before.captureEnabled });
+          if (shouldReconcileAfterSettingsChange(before, after)) {
+            await runtime?.reconcileAfterSettingsChange();
+          }
           refreshTrayMenu();
         }
       },
@@ -268,7 +273,8 @@ function registerIpc(): void {
   ipcMain.handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
     try {
       const { launchAtStartup, ...ordinaryPatch } = patch;
-      let settings = await store.getSettings();
+      const before = await store.getSettings();
+      let settings = before;
       if (Object.keys(ordinaryPatch).length > 0) {
         settings = await store.updateSettings(ordinaryPatch);
       }
@@ -276,7 +282,7 @@ function registerIpc(): void {
         await startupManager.setEnabled(launchAtStartup);
         settings = await store.getSettings();
       }
-      if (Object.keys(ordinaryPatch).length > 0) {
+      if (shouldReconcileAfterSettingsChange(before, settings)) {
         await runtime?.reconcileAfterSettingsChange();
       }
       await applyHotkeySettings(settings);
