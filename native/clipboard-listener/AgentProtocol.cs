@@ -63,11 +63,12 @@ namespace HistoryClipboard.ClipboardListener
     public sealed class AgentFrame
     {
         private static readonly byte[] EmptyPayload = new byte[0];
+        private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
         private AgentFrame(string type)
         {
             Type = type;
-            Payload = EmptyPayload;
+            PayloadBytes = EmptyPayload;
         }
 
         public string Type { get; private set; }
@@ -83,7 +84,9 @@ namespace HistoryClipboard.ClipboardListener
         public uint ToSequence { get; private set; }
         public int Dropped { get; private set; }
         public string Code { get; private set; }
-        public byte[] Payload { get; private set; }
+        public int PayloadLength { get { return PayloadBytes.Length; } }
+        // Same-assembly protocol writers must treat this owned buffer as read-only.
+        internal byte[] PayloadBytes { get; private set; }
 
         public static AgentFrame Ready(int pid, uint sequence, long at)
         {
@@ -145,12 +148,13 @@ namespace HistoryClipboard.ClipboardListener
             }
             AgentProtocol.ValidateTimestamp(capturedAt, "capturedAt");
             ValidatePayloadLayout(payload.Length, text, png);
+            ValidateTextEncoding(payload, text);
 
             AgentFrame frame = new AgentFrame("snapshot");
             frame.HasSequence = true;
             frame.Sequence = sequence;
             frame.CapturedAt = capturedAt;
-            frame.Payload = payload;
+            frame.PayloadBytes = CopyPayload(payload);
             frame.Text = text;
             frame.Png = png;
             return frame;
@@ -247,6 +251,35 @@ namespace HistoryClipboard.ClipboardListener
             }
         }
 
+        private static void ValidateTextEncoding(byte[] payload, AgentTextSegment text)
+        {
+            if (text == null)
+            {
+                return;
+            }
+
+            try
+            {
+                StrictUtf8.GetCharCount(payload, text.Offset, text.Length);
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ArgumentException("Payload must be valid UTF-8 text.", "payload");
+            }
+        }
+
+        private static byte[] CopyPayload(byte[] payload)
+        {
+            if (payload.Length == 0)
+            {
+                return EmptyPayload;
+            }
+
+            byte[] owned = new byte[payload.Length];
+            Buffer.BlockCopy(payload, 0, owned, 0, payload.Length);
+            return owned;
+        }
+
         private static int CheckedSegmentEnd(int offset, int length)
         {
             try
@@ -277,7 +310,7 @@ namespace HistoryClipboard.ClipboardListener
             }
 
             byte[] header = SerializeHeader(frame);
-            byte[] payload = frame.Payload;
+            byte[] payload = frame.PayloadBytes;
             int frameLength = CalculateFrameLength(header.Length, payload.Length);
 
             using (BinaryWriter writer = new BinaryWriter(output, Encoding.UTF8, true))
@@ -298,7 +331,7 @@ namespace HistoryClipboard.ClipboardListener
         internal static int GetFrameLength(AgentFrame frame)
         {
             byte[] header = SerializeHeader(frame);
-            return CalculateFrameLength(header.Length, frame.Payload.Length);
+            return CalculateFrameLength(header.Length, frame.PayloadLength);
         }
 
         internal static void ValidateTimestamp(long value, string parameterName)
