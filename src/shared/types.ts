@@ -53,6 +53,14 @@ export type HistoryQuery = {
 
 export const STARTUP_DECISION_VERSION = 1;
 
+export type StartupState = {
+  desiredEnabled: boolean;
+  actualEnabled: boolean | null;
+  pendingDecision: boolean;
+  managed: boolean;
+  error: "query-failed" | "apply-failed" | "state-mismatch" | null;
+};
+
 export type AppSettings = {
   captureEnabled: boolean;
   maxItems: number;

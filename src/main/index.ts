@@ -7,6 +7,11 @@ import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type Histor
 import { ClipboardWatcher } from "./lib/clipboardWatcher";
 import { HistoryStore, type ImageInput } from "./lib/historyStore";
 import { SafeStorageKeyProvider } from "./lib/secureVault";
+import {
+  SecondInstanceWindowCoordinator,
+  StartupManager,
+  isLaunchAtLogin
+} from "./lib/startupManager";
 import { autoUpdater } from "electron-updater";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -15,7 +20,9 @@ let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let store: HistoryStore;
 let watcher: ClipboardWatcher;
+let startupManager: StartupManager;
 let isQuitting = false;
+const secondInstanceWindowCoordinator = new SecondInstanceWindowCoordinator();
 
 function windowStatePath(): string {
   return join(app.getPath("userData"), "window-state.json");
@@ -54,8 +61,12 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    showWindow();
+  app.on("second-instance", (_event, commandLine) => {
+    secondInstanceWindowCoordinator.handleSecondInstance(
+      commandLine,
+      mainWindow !== undefined,
+      showWindow
+    );
   });
 }
 
@@ -69,10 +80,13 @@ async function bootstrap(): Promise<void> {
   );
   await store.init();
 
+  startupManager = new StartupManager(app, store, process.execPath);
+  await startupManager.reconcile();
+
   createWindow();
   createTray();
   registerIpc();
-  await applySystemSettings(await store.getSettings());
+  await applyHotkeySettings(await store.getSettings());
 
   watcher = new ClipboardWatcher({
     getSettings: () => store.getSettings(),
@@ -83,9 +97,7 @@ async function bootstrap(): Promise<void> {
   });
   watcher.start();
 
-  // Don't show window if app auto-started (launchAtStartup) — stay in tray
-  const settings = await store.getSettings();
-  if (!settings.launchAtStartup) {
+  if (!isLaunchAtLogin(process.argv)) {
     mainWindow?.show();
   }
 
@@ -134,6 +146,8 @@ function createWindow(): void {
       console.error("Failed to load renderer file:", error);
     });
   }
+
+  secondInstanceWindowCoordinator.consumePendingShow(showWindow);
 }
 
 function createTray(): void {
@@ -231,8 +245,16 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
     try {
-      const settings = await store.updateSettings(patch);
-      await applySystemSettings(settings);
+      const { launchAtStartup, ...ordinaryPatch } = patch;
+      let settings = await store.getSettings();
+      if (Object.keys(ordinaryPatch).length > 0) {
+        settings = await store.updateSettings(ordinaryPatch);
+      }
+      if (typeof launchAtStartup === "boolean") {
+        await startupManager.setEnabled(launchAtStartup);
+        settings = await store.getSettings();
+      }
+      await applyHotkeySettings(settings);
       refreshTrayMenu();
       return settings;
     } catch (error) {
@@ -306,8 +328,7 @@ async function copyHistoryItem(id: string): Promise<{ ok: boolean }> {
   return { ok: true };
 }
 
-async function applySystemSettings(settings: AppSettings): Promise<void> {
-  app.setLoginItemSettings({ openAtLogin: settings.launchAtStartup });
+async function applyHotkeySettings(settings: AppSettings): Promise<void> {
   globalShortcut.unregister(toElectronAccelerator(settings.hotkey));
   const registered = globalShortcut.register(toElectronAccelerator(settings.hotkey), toggleWindow);
   if (!registered) {
