@@ -23,17 +23,23 @@ const coreSources = [
   path.join(root, "native", "clipboard-listener", "AgentProtocol.cs"),
   path.join(root, "native", "clipboard-listener", "ClipboardFrameQueue.cs")
 ];
+const productionSources = coreSources.concat([
+  path.join(root, "native", "clipboard-listener", "NativeMethods.cs"),
+  path.join(root, "native", "clipboard-listener", "ClipboardSnapshotReader.cs"),
+  path.join(root, "native", "clipboard-listener", "ClipboardListenerWindow.cs"),
+  path.join(root, "native", "clipboard-listener", "Program.cs")
+]);
 const output = tests
   ? path.join("build", "clipboard-listener-tests.exe")
-  : path.join("build", "clipboard-listener-core.dll");
+  : path.join("build", "clipboard-listener.exe");
 const sources = tests
   ? coreSources.concat(path.join(root, "native", "clipboard-listener-tests", "Program.cs"))
-  : coreSources;
+  : productionSources;
 
 const args = [
   "/nologo",
   "/langversion:5",
-  tests ? "/target:exe" : "/target:library",
+  "/target:exe",
   `/out:${output}`,
   "/reference:System.dll",
   "/reference:System.Core.dll",
