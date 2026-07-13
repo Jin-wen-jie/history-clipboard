@@ -78,6 +78,8 @@ namespace HistoryClipboard.ClipboardListener
 
     internal sealed class CapturedImageCandidate : IDisposable
     {
+        private Action _afterDispose;
+
         private CapturedImageCandidate(
             CapturedImageCandidateKind kind,
             byte[] bytes,
@@ -116,17 +118,24 @@ namespace HistoryClipboard.ClipboardListener
 
         internal static CapturedImageCandidate FromBitmap(Bitmap bitmap)
         {
+            return FromBitmap(bitmap, null);
+        }
+
+        internal static CapturedImageCandidate FromBitmap(Bitmap bitmap, Action afterDispose)
+        {
             if (bitmap == null)
             {
                 throw new ArgumentNullException("bitmap");
             }
             long storedBytes = checked((long)bitmap.Width * bitmap.Height * 4L);
-            return new CapturedImageCandidate(
+            CapturedImageCandidate candidate = new CapturedImageCandidate(
                 CapturedImageCandidateKind.Bitmap,
                 null,
                 bitmap,
                 storedBytes,
                 null);
+            candidate._afterDispose = afterDispose;
+            return candidate;
         }
 
         internal static CapturedImageCandidate Failure(
@@ -147,10 +156,25 @@ namespace HistoryClipboard.ClipboardListener
                 return;
             }
             IsDisposed = true;
-            if (Bitmap != null)
+            Bitmap bitmap = Bitmap;
+            Action afterDispose = _afterDispose;
+            Bitmap = null;
+            Bytes = null;
+            StoredBytes = 0;
+            _afterDispose = null;
+            try
             {
-                Bitmap.Dispose();
-                Bitmap = null;
+                if (bitmap != null)
+                {
+                    bitmap.Dispose();
+                }
+            }
+            finally
+            {
+                if (afterDispose != null)
+                {
+                    afterDispose();
+                }
             }
         }
     }
@@ -233,6 +257,273 @@ namespace HistoryClipboard.ClipboardListener
         }
     }
 
+    internal struct CapturedBitmapMetadata
+    {
+        internal CapturedBitmapMetadata(int width, int height, int stride)
+            : this()
+        {
+            Width = width;
+            Height = height;
+            Stride = stride;
+        }
+
+        internal int Width { get; private set; }
+        internal int Height { get; private set; }
+        internal int Stride { get; private set; }
+    }
+
+    internal interface ICapturedBitmapFactory
+    {
+        bool TryGetMetadata(IntPtr handle, out CapturedBitmapMetadata metadata);
+        Bitmap Clone(IntPtr handle, int width, int height);
+    }
+
+    internal sealed class NativeCapturedBitmapFactory : ICapturedBitmapFactory
+    {
+        internal static readonly NativeCapturedBitmapFactory Instance =
+            new NativeCapturedBitmapFactory();
+
+        private NativeCapturedBitmapFactory()
+        {
+        }
+
+        public bool TryGetMetadata(IntPtr handle, out CapturedBitmapMetadata metadata)
+        {
+            NativeMethods.BitmapObject bitmapObject;
+            int expectedBytes = Marshal.SizeOf(typeof(NativeMethods.BitmapObject));
+            int bytes = NativeMethods.GetObject(
+                handle,
+                expectedBytes,
+                out bitmapObject);
+            if (bytes != expectedBytes)
+            {
+                metadata = new CapturedBitmapMetadata();
+                return false;
+            }
+            metadata = new CapturedBitmapMetadata(
+                bitmapObject.Width,
+                bitmapObject.Height,
+                bitmapObject.WidthBytes);
+            return true;
+        }
+
+        public Bitmap Clone(IntPtr handle, int width, int height)
+        {
+            using (Bitmap clipboardBitmap = Image.FromHbitmap(handle))
+            {
+                if (clipboardBitmap.Width != width || clipboardBitmap.Height != height)
+                {
+                    throw new InvalidDataException();
+                }
+
+                Bitmap owned = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                try
+                {
+                    using (Graphics graphics = Graphics.FromImage(owned))
+                    {
+                        graphics.Clear(Color.Transparent);
+                        graphics.DrawImageUnscaled(clipboardBitmap, 0, 0);
+                    }
+                    Bitmap result = owned;
+                    owned = null;
+                    return result;
+                }
+                finally
+                {
+                    if (owned != null)
+                    {
+                        owned.Dispose();
+                    }
+                }
+            }
+        }
+    }
+
+    internal sealed class CaptureLimitExceededException : IOException
+    {
+        internal CaptureLimitExceededException()
+            : base("Capture limit exceeded.")
+        {
+        }
+    }
+
+    internal sealed class BoundedMemoryStream : Stream
+    {
+        private readonly MemoryStream _inner;
+        private readonly long _maxLength;
+        private bool _disposed;
+
+        internal BoundedMemoryStream(long maxLength)
+        {
+            if (maxLength < 0 || maxLength > int.MaxValue)
+            {
+                throw new ArgumentOutOfRangeException("maxLength");
+            }
+            _maxLength = maxLength;
+            _inner = new MemoryStream((int)maxLength);
+        }
+
+        internal bool LimitExceeded { get; private set; }
+
+        public override bool CanRead { get { return !_disposed && _inner.CanRead; } }
+        public override bool CanSeek { get { return !_disposed && _inner.CanSeek; } }
+        public override bool CanWrite { get { return !_disposed && _inner.CanWrite; } }
+        public override long Length { get { EnsureNotDisposed(); return _inner.Length; } }
+        public override long Position
+        {
+            get { EnsureNotDisposed(); return _inner.Position; }
+            set
+            {
+                EnsureNotDisposed();
+                EnsureWithinLimit(value);
+                _inner.Position = value;
+            }
+        }
+
+        public override void Flush()
+        {
+            EnsureNotDisposed();
+            _inner.Flush();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            EnsureNotDisposed();
+            return _inner.Read(buffer, offset, count);
+        }
+
+        public override int ReadByte()
+        {
+            EnsureNotDisposed();
+            return _inner.ReadByte();
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            EnsureNotDisposed();
+            long basis;
+            if (origin == SeekOrigin.Begin)
+            {
+                basis = 0;
+            }
+            else if (origin == SeekOrigin.Current)
+            {
+                basis = _inner.Position;
+            }
+            else if (origin == SeekOrigin.End)
+            {
+                basis = _inner.Length;
+            }
+            else
+            {
+                throw new ArgumentOutOfRangeException("origin");
+            }
+
+            long target;
+            try
+            {
+                target = checked(basis + offset);
+            }
+            catch (OverflowException)
+            {
+                ThrowLimitExceeded();
+                throw;
+            }
+            EnsureWithinLimit(target);
+            _inner.Position = target;
+            return target;
+        }
+
+        public override void SetLength(long value)
+        {
+            EnsureNotDisposed();
+            EnsureWithinLimit(value);
+            _inner.SetLength(value);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            EnsureNotDisposed();
+            if (buffer == null)
+            {
+                throw new ArgumentNullException("buffer");
+            }
+            if (offset < 0 || count < 0 || offset > buffer.Length - count)
+            {
+                throw new ArgumentOutOfRangeException();
+            }
+            EnsureWriteFits(count);
+            _inner.Write(buffer, offset, count);
+        }
+
+        public override void WriteByte(byte value)
+        {
+            EnsureNotDisposed();
+            EnsureWriteFits(1);
+            _inner.WriteByte(value);
+        }
+
+        internal byte[] ToArray()
+        {
+            EnsureNotDisposed();
+            return _inner.ToArray();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                if (disposing)
+                {
+                    _inner.Dispose();
+                }
+            }
+            base.Dispose(disposing);
+        }
+
+        private void EnsureWriteFits(int count)
+        {
+            long end;
+            try
+            {
+                end = checked(_inner.Position + count);
+            }
+            catch (OverflowException)
+            {
+                ThrowLimitExceeded();
+                throw;
+            }
+            EnsureWithinLimit(end);
+        }
+
+        private void EnsureWithinLimit(long value)
+        {
+            if (value < 0)
+            {
+                throw new IOException("Invalid stream position.");
+            }
+            if (value > _maxLength)
+            {
+                ThrowLimitExceeded();
+            }
+        }
+
+        private void ThrowLimitExceeded()
+        {
+            LimitExceeded = true;
+            throw new CaptureLimitExceededException();
+        }
+
+        private void EnsureNotDisposed()
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException("BoundedMemoryStream");
+            }
+        }
+    }
+
     internal sealed class ClipboardSnapshotReader
     {
         private const int OpenTimeoutMilliseconds = 1000;
@@ -240,7 +531,9 @@ namespace HistoryClipboard.ClipboardListener
         private const int MaxClipboardBytes = AgentProtocol.MaxFrameLength;
         private const int MaxImageDimension = 32768;
         private const long MaxImagePixels = 16L * 1024L * 1024L;
-        private const long EstimatedPngOverheadBytes = 64L * 1024L;
+        private const long PngAncillaryOverheadBytes = 64L * 1024L;
+        private const long PngIdatChunkBytes = 64L * 1024L;
+        private const long PngFixedStructureBytes = 45L;
         internal const long MaxCapturedImageCandidateBytes = 64L * 1024L * 1024L;
         internal const long MaxCaptureWorkingBytes = 128L * 1024L * 1024L;
 
@@ -272,53 +565,81 @@ namespace HistoryClipboard.ClipboardListener
             long capturedAt = 0;
             string errorCode = null;
 
+            return ExecuteWithCandidateCleanup(
+                imageCandidates,
+                delegate
+                {
+                    try
+                    {
+                        ReadUnicodeText(out hasText, out unicodeBytes, ref errorCode);
+                        ReadImageCandidates(imageCandidates);
+                        after = NativeMethods.GetClipboardSequenceNumber();
+                        capturedAt = AgentFrame.CurrentUnixMilliseconds();
+                        if (after != before)
+                        {
+                            sequenceAdvanced = true;
+                        }
+                    }
+                    catch
+                    {
+                        MergeError(ref errorCode, "internal");
+                        after = NativeMethods.GetClipboardSequenceNumber();
+                        capturedAt = AgentFrame.CurrentUnixMilliseconds();
+                    }
+                    finally
+                    {
+                        NativeMethods.CloseClipboard();
+                    }
+
+                    string text = null;
+                    if (hasText && !TryDecodeUnicode(unicodeBytes, out text))
+                    {
+                        hasText = false;
+                        MergeError(ref errorCode, "internal");
+                    }
+
+                    CapturedImageConversionResult image =
+                        ConvertFirstValidCandidate(imageCandidates, MaxCaptureWorkingBytes);
+                    if (image.ErrorCode != null)
+                    {
+                        MergeError(ref errorCode, image.ErrorCode);
+                    }
+
+                    return ClipboardSnapshotResult.Success(
+                        before,
+                        after,
+                        sequenceAdvanced,
+                        hasText,
+                        text,
+                        image.PngBytes,
+                        image.Width,
+                        image.Height,
+                        capturedAt,
+                        errorCode);
+                });
+        }
+
+        internal static T ExecuteWithCandidateCleanup<T>(
+            IList<CapturedImageCandidate> candidates,
+            Func<T> action)
+        {
+            if (candidates == null)
+            {
+                throw new ArgumentNullException("candidates");
+            }
+            if (action == null)
+            {
+                throw new ArgumentNullException("action");
+            }
+
             try
             {
-                ReadUnicodeText(out hasText, out unicodeBytes, ref errorCode);
-                ReadImageCandidates(imageCandidates);
-                after = NativeMethods.GetClipboardSequenceNumber();
-                capturedAt = AgentFrame.CurrentUnixMilliseconds();
-                if (after != before)
-                {
-                    sequenceAdvanced = true;
-                }
-            }
-            catch
-            {
-                MergeError(ref errorCode, "internal");
-                after = NativeMethods.GetClipboardSequenceNumber();
-                capturedAt = AgentFrame.CurrentUnixMilliseconds();
+                return action();
             }
             finally
             {
-                NativeMethods.CloseClipboard();
+                DisposeCandidatesBestEffort(candidates);
             }
-
-            string text = null;
-            if (hasText && !TryDecodeUnicode(unicodeBytes, out text))
-            {
-                hasText = false;
-                MergeError(ref errorCode, "internal");
-            }
-
-            CapturedImageConversionResult image =
-                ConvertFirstValidCandidate(imageCandidates, MaxCaptureWorkingBytes);
-            if (image.ErrorCode != null)
-            {
-                MergeError(ref errorCode, image.ErrorCode);
-            }
-
-            return ClipboardSnapshotResult.Success(
-                before,
-                after,
-                sequenceAdvanced,
-                hasText,
-                text,
-                image.PngBytes,
-                image.Width,
-                image.Height,
-                capturedAt,
-                errorCode);
         }
 
         private static bool OpenWithRetry(
@@ -453,74 +774,118 @@ namespace HistoryClipboard.ClipboardListener
                 return;
             }
 
-            long reservedBytes = 0;
+            candidates.Add(CreateBitmapCandidate(
+                handle,
+                budget,
+                MaxCaptureWorkingBytes,
+                NativeCapturedBitmapFactory.Instance));
+        }
+
+        internal static CapturedImageCandidate CreateBitmapCandidate(
+            IntPtr handle,
+            CaptureMemoryBudget rawBudget,
+            long maxCaptureWorkingBytes,
+            ICapturedBitmapFactory factory)
+        {
+            if (rawBudget == null)
+            {
+                throw new ArgumentNullException("rawBudget");
+            }
+            if (factory == null)
+            {
+                throw new ArgumentNullException("factory");
+            }
+            if (maxCaptureWorkingBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("maxCaptureWorkingBytes");
+            }
+
+            long ownedBytes = 0;
+            bool reserved = false;
+            bool transferred = false;
+            Bitmap owned = null;
             try
             {
-                using (Bitmap clipboardBitmap = Image.FromHbitmap(handle))
+                CapturedBitmapMetadata metadata;
+                if (!factory.TryGetMetadata(handle, out metadata))
                 {
-                    if (!DimensionsAreValid(clipboardBitmap.Width, clipboardBitmap.Height))
-                    {
-                        candidates.Add(CapturedImageCandidate.Failure(
-                            CapturedImageCandidateKind.Bitmap,
-                            "too-large"));
-                        return;
-                    }
-
-                    reservedBytes = checked(
-                        (long)clipboardBitmap.Width * clipboardBitmap.Height * 4L);
-                    if (!budget.TryReserve(reservedBytes))
-                    {
-                        candidates.Add(CapturedImageCandidate.Failure(
-                            CapturedImageCandidateKind.Bitmap,
-                            "too-large"));
-                        reservedBytes = 0;
-                        return;
-                    }
-
-                    Bitmap owned = new Bitmap(
-                        clipboardBitmap.Width,
-                        clipboardBitmap.Height,
-                        PixelFormat.Format32bppArgb);
-                    try
-                    {
-                        using (Graphics graphics = Graphics.FromImage(owned))
-                        {
-                            graphics.Clear(Color.Transparent);
-                            graphics.DrawImageUnscaled(clipboardBitmap, 0, 0);
-                        }
-                        candidates.Add(CapturedImageCandidate.FromBitmap(owned));
-                        owned = null;
-                        reservedBytes = 0;
-                        return;
-                    }
-                    finally
-                    {
-                        if (owned != null)
-                        {
-                            owned.Dispose();
-                        }
-                    }
+                    return CapturedImageCandidate.Failure(
+                        CapturedImageCandidateKind.Bitmap,
+                        "internal");
                 }
+                if (metadata.Width <= 0 || metadata.Height == 0 || metadata.Stride == 0)
+                {
+                    return CapturedImageCandidate.Failure(
+                        CapturedImageCandidateKind.Bitmap,
+                        "internal");
+                }
+                if (metadata.Height == int.MinValue || metadata.Stride == int.MinValue)
+                {
+                    return CapturedImageCandidate.Failure(
+                        CapturedImageCandidateKind.Bitmap,
+                        "too-large");
+                }
+
+                int height = Math.Abs(metadata.Height);
+                long stride = Math.Abs((long)metadata.Stride);
+                if (!DimensionsAreValid(metadata.Width, height))
+                {
+                    return CapturedImageCandidate.Failure(
+                        CapturedImageCandidateKind.Bitmap,
+                        "too-large");
+                }
+
+                long sourceBytes = checked(stride * height);
+                ownedBytes = checked((long)metadata.Width * height * 4L);
+                long cloneBytes = Math.Max(sourceBytes, ownedBytes);
+                long capturePeak = checked(
+                    rawBudget.UsedBytes + cloneBytes + ownedBytes);
+                if (capturePeak > maxCaptureWorkingBytes || !rawBudget.TryReserve(ownedBytes))
+                {
+                    return CapturedImageCandidate.Failure(
+                        CapturedImageCandidateKind.Bitmap,
+                        "too-large");
+                }
+                reserved = true;
+
+                owned = factory.Clone(handle, metadata.Width, height);
+                if (owned == null || owned.Width != metadata.Width || owned.Height != height)
+                {
+                    throw new InvalidDataException();
+                }
+                CapturedImageCandidate candidate = CapturedImageCandidate.FromBitmap(owned);
+                owned = null;
+                transferred = true;
+                return candidate;
+            }
+            catch (OverflowException)
+            {
+                return CapturedImageCandidate.Failure(
+                    CapturedImageCandidateKind.Bitmap,
+                    "too-large");
             }
             catch (OutOfMemoryException)
             {
-                if (reservedBytes != 0)
-                {
-                    budget.Release(reservedBytes);
-                }
-                candidates.Add(CapturedImageCandidate.Failure(
+                return CapturedImageCandidate.Failure(
                     CapturedImageCandidateKind.Bitmap,
-                    "too-large"));
+                    "too-large");
             }
             catch
             {
-                if (reservedBytes != 0)
-                {
-                    budget.Release(reservedBytes);
-                }
-                candidates.Add(CapturedImageCandidate.Failure(
+                return CapturedImageCandidate.Failure(
                     CapturedImageCandidateKind.Bitmap,
-                    "internal"));
+                    "internal");
+            }
+            finally
+            {
+                if (owned != null)
+                {
+                    owned.Dispose();
+                }
+                if (reserved && !transferred)
+                {
+                    rawBudget.Release(ownedBytes);
+                }
             }
         }
 
@@ -650,6 +1015,7 @@ namespace HistoryClipboard.ClipboardListener
                     if (candidate.ErrorCode != null)
                     {
                         MergeError(ref errorCode, candidate.ErrorCode);
+                        ReleaseCandidate(candidate, ref retainedBytes);
                         continue;
                     }
 
@@ -678,11 +1044,15 @@ namespace HistoryClipboard.ClipboardListener
                         else if (candidate.Kind == CapturedImageCandidateKind.DibV5
                             || candidate.Kind == CapturedImageCandidateKind.Dib)
                         {
-                            png = ConvertDib(candidate.Bytes);
+                            png = ConvertDib(
+                                candidate.Bytes,
+                                GetPngOutputLimit(width, height));
                         }
                         else
                         {
-                            png = EncodeBitmap(candidate.Bitmap);
+                            png = EncodeBitmap(
+                                candidate.Bitmap,
+                                GetPngOutputLimit(width, height));
                         }
                         return CapturedImageConversionResult.Success(
                             candidate.Kind,
@@ -693,10 +1063,22 @@ namespace HistoryClipboard.ClipboardListener
                     catch (CaptureTooLargeException)
                     {
                         MergeError(ref errorCode, "too-large");
+                        ReleaseCandidate(candidate, ref retainedBytes);
+                    }
+                    catch (CaptureLimitExceededException)
+                    {
+                        MergeError(ref errorCode, "too-large");
+                        ReleaseCandidate(candidate, ref retainedBytes);
+                    }
+                    catch (OutOfMemoryException)
+                    {
+                        MergeError(ref errorCode, "too-large");
+                        ReleaseCandidate(candidate, ref retainedBytes);
                     }
                     catch
                     {
                         MergeError(ref errorCode, "internal");
+                        ReleaseCandidate(candidate, ref retainedBytes);
                     }
                 }
 
@@ -708,12 +1090,46 @@ namespace HistoryClipboard.ClipboardListener
             }
             finally
             {
-                for (int index = 0; index < candidates.Count; index++)
+                DisposeCandidatesBestEffort(candidates);
+            }
+        }
+
+        private static void ReleaseCandidate(
+            CapturedImageCandidate candidate,
+            ref long retainedBytes)
+        {
+            long storedBytes = candidate.StoredBytes;
+            try
+            {
+                candidate.Dispose();
+            }
+            catch
+            {
+            }
+            if (retainedBytes != long.MaxValue)
+            {
+                retainedBytes = storedBytes > retainedBytes
+                    ? 0
+                    : retainedBytes - storedBytes;
+            }
+        }
+
+        private static void DisposeCandidatesBestEffort(
+            IList<CapturedImageCandidate> candidates)
+        {
+            for (int index = 0; index < candidates.Count; index++)
+            {
+                CapturedImageCandidate candidate = candidates[index];
+                if (candidate == null)
                 {
-                    if (candidates[index] != null)
-                    {
-                        candidates[index].Dispose();
-                    }
+                    continue;
+                }
+                try
+                {
+                    candidate.Dispose();
+                }
+                catch
+                {
                 }
             }
         }
@@ -734,11 +1150,11 @@ namespace HistoryClipboard.ClipboardListener
             try
             {
                 long pixelBytes = checked((long)width * height * 4L);
-                long estimatedPngBytes = checked(pixelBytes + EstimatedPngOverheadBytes);
                 if (kind == CapturedImageCandidateKind.Png)
                 {
                     return checked(retainedCandidateBytes + checked(pixelBytes * 2L));
                 }
+                long estimatedPngBytes = GetPngOutputLimit(width, height);
                 if (kind == CapturedImageCandidateKind.DibV5
                     || kind == CapturedImageCandidateKind.Dib)
                 {
@@ -750,6 +1166,36 @@ namespace HistoryClipboard.ClipboardListener
                         + checked(estimatedPngBytes * 2L));
                 }
                 return checked(retainedCandidateBytes + checked(estimatedPngBytes * 2L));
+            }
+            catch (OverflowException)
+            {
+                throw new CaptureTooLargeException();
+            }
+        }
+
+        private static int GetPngOutputLimit(int width, int height)
+        {
+            EnsureDimensions(width, height);
+            try
+            {
+                long scanlineBytes = checked((checked((long)width * 4L) + 1L) * height);
+                long deflateBound = checked(
+                    scanlineBytes
+                    + (scanlineBytes >> 12)
+                    + (scanlineBytes >> 14)
+                    + (scanlineBytes >> 25)
+                    + 13L);
+                long idatChunks = checked(
+                    (deflateBound + PngIdatChunkBytes - 1L) / PngIdatChunkBytes);
+                long worstCase = checked(
+                    deflateBound
+                    + checked(idatChunks * 12L)
+                    + PngFixedStructureBytes
+                    + PngAncillaryOverheadBytes);
+                long protocolLimit = Math.Min(
+                    MaxClipboardBytes,
+                    AgentProtocol.MaxSnapshotPayloadLength);
+                return (int)Math.Min(worstCase, protocolLimit);
             }
             catch (OverflowException)
             {
@@ -898,7 +1344,7 @@ namespace HistoryClipboard.ClipboardListener
             return new PngData(bytes, width, height);
         }
 
-        private static PngData ConvertDib(byte[] dib)
+        private static PngData ConvertDib(byte[] dib, int maxPngBytes)
         {
             byte[] bitmapFile = BuildBitmapFile(dib);
             using (MemoryStream stream = new MemoryStream(bitmapFile, false))
@@ -915,12 +1361,12 @@ namespace HistoryClipboard.ClipboardListener
                         graphics.Clear(Color.Transparent);
                         graphics.DrawImageUnscaled(decoded, 0, 0);
                     }
-                    return EncodeBitmap(owned);
+                    return EncodeBitmap(owned, maxPngBytes);
                 }
             }
         }
 
-        private static PngData EncodeBitmap(Bitmap bitmap)
+        private static PngData EncodeBitmap(Bitmap bitmap, int maxPngBytes)
         {
             if (bitmap == null)
             {
@@ -928,12 +1374,19 @@ namespace HistoryClipboard.ClipboardListener
             }
             EnsureDimensions(bitmap.Width, bitmap.Height);
 
-            using (MemoryStream stream = new MemoryStream())
+            using (BoundedMemoryStream stream = new BoundedMemoryStream(maxPngBytes))
             {
-                bitmap.Save(stream, ImageFormat.Png);
-                if (stream.Length > MaxClipboardBytes)
+                try
                 {
-                    throw new CaptureTooLargeException();
+                    bitmap.Save(stream, ImageFormat.Png);
+                }
+                catch
+                {
+                    if (stream.LimitExceeded)
+                    {
+                        throw new CaptureTooLargeException();
+                    }
+                    throw;
                 }
                 return new PngData(stream.ToArray(), bitmap.Width, bitmap.Height);
             }

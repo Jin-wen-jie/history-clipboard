@@ -5,6 +5,18 @@ namespace HistoryClipboard.ClipboardListener
 {
     internal static class NativeMethods
     {
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct BitmapObject
+        {
+            internal int Type;
+            internal int Width;
+            internal int Height;
+            internal int WidthBytes;
+            internal ushort Planes;
+            internal ushort BitsPixel;
+            internal IntPtr Bits;
+        }
+
         internal const int WM_CLIPBOARDUPDATE = 0x031D;
         internal const int WM_APP = 0x8000;
         internal const int WM_AGENT_SHUTDOWN = WM_APP + 0x41;
@@ -73,5 +85,12 @@ namespace HistoryClipboard.ClipboardListener
         [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true,
             CallingConvention = CallingConvention.Winapi)]
         internal static extern UIntPtr GlobalSize(IntPtr memoryHandle);
+
+        [DllImport("gdi32.dll", EntryPoint = "GetObjectW", ExactSpelling = true,
+            SetLastError = true, CallingConvention = CallingConvention.Winapi)]
+        internal static extern int GetObject(
+            IntPtr graphicsObject,
+            int bufferSize,
+            out BitmapObject bitmapObject);
     }
 }

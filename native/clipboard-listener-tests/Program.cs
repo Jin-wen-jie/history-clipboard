@@ -22,9 +22,14 @@ internal static class Program
             Run("image-candidate-fallback", FallsBackFromInvalidPngToDib);
             Run("image-candidate-priority", PreservesImageCandidatePriority);
             Run("image-candidate-budget-fallback", FallsBackAfterCandidateBudgetFailure);
+            Run("image-candidate-retained-release", ReleasesRejectedCandidateWorkingSet);
             Run("image-candidate-errors", ReportsFixedCandidateErrors);
             Run("image-candidate-disposal", DisposesAllBitmapCandidates);
             Run("image-capture-budget", BoundsCandidateAndWorkingMemory);
+            Run("bitmap-preflight-before-clone", RejectsBitmapBeforeCloneAllocation);
+            Run("bounded-png-output-stream", BoundsEveryOutputGrowthPath);
+            Run("candidate-preconversion-cleanup", CleansAllCandidatesWhenPreconversionFails);
+            Run("candidate-best-effort-cleanup", ContinuesAfterCandidateDisposeFailure);
             Run("overflow-gap-order", OverflowGapRespectsQueuedControls);
             Run("overflow-gap-intervening-controls", OverflowGapDoesNotOvertakeInterveningControls);
             Run("overflow-gap-reposition", RepositionsExistingOverflowGap);
@@ -202,6 +207,39 @@ internal static class Program
         AssertPngSignature(result.PngBytes);
     }
 
+    private static void ReleasesRejectedCandidateWorkingSet()
+    {
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Png,
+            CreatePngHeaderCandidate(256 * 1024, 1, 1)));
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Dib,
+            CreateOnePixelDib(0, 0, 0)));
+
+        CapturedImageConversionResult result =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, 200 * 1024);
+
+        AssertEqual(null, result.ErrorCode);
+        AssertEqual(CapturedImageCandidateKind.Dib, result.SourceKind.Value);
+        AssertPngSignature(result.PngBytes);
+    }
+
+    private static byte[] CreatePngHeaderCandidate(int length, int width, int height)
+    {
+        byte[] png = new byte[length];
+        byte[] signature = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 };
+        Buffer.BlockCopy(signature, 0, png, 0, signature.Length);
+        WriteUInt32BigEndian(png, 8, 13);
+        png[12] = (byte)'I';
+        png[13] = (byte)'H';
+        png[14] = (byte)'D';
+        png[15] = (byte)'R';
+        WriteUInt32BigEndian(png, 16, (uint)width);
+        WriteUInt32BigEndian(png, 20, (uint)height);
+        return png;
+    }
+
     private static void ReportsFixedCandidateErrors()
     {
         List<CapturedImageCandidate> invalid = new List<CapturedImageCandidate>();
@@ -256,6 +294,97 @@ internal static class Program
         AssertTrue(!workingBudget.TryReserve(first));
     }
 
+    private static void RejectsBitmapBeforeCloneAllocation()
+    {
+        CaptureMemoryBudget rawBudget = new CaptureMemoryBudget(128L * 1024L * 1024L);
+        AssertTrue(rawBudget.TryReserve(1));
+        RecordingBitmapFactory factory = new RecordingBitmapFactory(
+            new CapturedBitmapMetadata(4096, 4096, 512));
+
+        CapturedImageCandidate candidate = ClipboardSnapshotReader.CreateBitmapCandidate(
+            new IntPtr(1),
+            rawBudget,
+            128L * 1024L * 1024L,
+            factory);
+
+        AssertEqual("too-large", candidate.ErrorCode);
+        AssertEqual(0, factory.CloneCalls);
+        AssertEqual((long)1, rawBudget.UsedBytes);
+        candidate.Dispose();
+    }
+
+    private static void BoundsEveryOutputGrowthPath()
+    {
+        using (BoundedMemoryStream stream = new BoundedMemoryStream(4))
+        {
+            stream.Write(new byte[] { 1, 2, 3 }, 0, 3);
+            stream.WriteByte(4);
+            AssertEqual((long)4, stream.Length);
+            AssertEqual(4, stream.ToArray().Length);
+
+            AssertThrows<CaptureLimitExceededException>(delegate { stream.WriteByte(5); });
+            stream.Position = 3;
+            AssertThrows<CaptureLimitExceededException>(delegate
+            {
+                stream.Write(new byte[] { 6, 7 }, 0, 2);
+            });
+            AssertThrows<CaptureLimitExceededException>(delegate { stream.SetLength(5); });
+            AssertThrows<CaptureLimitExceededException>(delegate { stream.Position = 5; });
+            AssertThrows<CaptureLimitExceededException>(delegate
+            {
+                stream.Seek(5, SeekOrigin.Begin);
+            });
+            AssertEqual((long)4, stream.Length);
+        }
+    }
+
+    private static void CleansAllCandidatesWhenPreconversionFails()
+    {
+        bool secondCleanup = false;
+        CapturedImageCandidate first = CapturedImageCandidate.FromBitmap(
+            new System.Drawing.Bitmap(1, 1),
+            delegate { throw new InvalidOperationException(); });
+        CapturedImageCandidate second = CapturedImageCandidate.FromBitmap(
+            new System.Drawing.Bitmap(1, 1),
+            delegate { secondCleanup = true; });
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(first);
+        candidates.Add(second);
+
+        AssertThrows<InvalidOperationException>(delegate
+        {
+            ClipboardSnapshotReader.ExecuteWithCandidateCleanup<int>(
+                candidates,
+                delegate { throw new InvalidOperationException(); });
+        });
+
+        AssertTrue(first.IsDisposed);
+        AssertTrue(second.IsDisposed);
+        AssertTrue(secondCleanup);
+    }
+
+    private static void ContinuesAfterCandidateDisposeFailure()
+    {
+        bool secondCleanup = false;
+        CapturedImageCandidate first = CapturedImageCandidate.FromBitmap(
+            new System.Drawing.Bitmap(1, 1),
+            delegate { throw new InvalidOperationException(); });
+        CapturedImageCandidate second = CapturedImageCandidate.FromBitmap(
+            new System.Drawing.Bitmap(1, 1),
+            delegate { secondCleanup = true; });
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(first);
+        candidates.Add(second);
+
+        CapturedImageConversionResult result =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, 16 * 1024 * 1024);
+
+        AssertEqual(null, result.ErrorCode);
+        AssertTrue(first.IsDisposed);
+        AssertTrue(second.IsDisposed);
+        AssertTrue(secondCleanup);
+    }
+
     private static byte[] CreateOnePixelDib(byte blue, byte green, byte red)
     {
         byte[] dib = new byte[44];
@@ -278,6 +407,14 @@ internal static class Program
         bytes[offset + 1] = (byte)(value >> 8);
         bytes[offset + 2] = (byte)(value >> 16);
         bytes[offset + 3] = (byte)(value >> 24);
+    }
+
+    private static void WriteUInt32BigEndian(byte[] bytes, int offset, uint value)
+    {
+        bytes[offset] = (byte)(value >> 24);
+        bytes[offset + 1] = (byte)(value >> 16);
+        bytes[offset + 2] = (byte)(value >> 8);
+        bytes[offset + 3] = (byte)value;
     }
 
     private static void AssertPngSignature(byte[] png)
@@ -975,6 +1112,30 @@ internal static class Program
         public override void Write(byte[] buffer, int offset, int count)
         {
             _length = checked(_length + count);
+        }
+    }
+
+    private sealed class RecordingBitmapFactory : ICapturedBitmapFactory
+    {
+        private readonly CapturedBitmapMetadata _metadata;
+
+        internal RecordingBitmapFactory(CapturedBitmapMetadata metadata)
+        {
+            _metadata = metadata;
+        }
+
+        internal int CloneCalls { get; private set; }
+
+        public bool TryGetMetadata(IntPtr handle, out CapturedBitmapMetadata metadata)
+        {
+            metadata = _metadata;
+            return true;
+        }
+
+        public System.Drawing.Bitmap Clone(IntPtr handle, int width, int height)
+        {
+            CloneCalls++;
+            return new System.Drawing.Bitmap(1, 1);
         }
     }
 }
