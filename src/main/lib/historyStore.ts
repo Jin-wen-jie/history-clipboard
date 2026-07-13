@@ -598,7 +598,7 @@ export class HistoryStore {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           needsRepair = true;
-          migrationEvidence = { ...evidence, settingsExists: false };
+          migrationEvidence = { ...evidence, settingsCorrupt: true };
         } else if (error instanceof SyntaxError) {
           needsRepair = true;
           migrationEvidence = { ...evidence, settingsCorrupt: true };

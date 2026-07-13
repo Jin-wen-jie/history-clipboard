@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { HistoryStore } from "./historyStore";
 import { MemoryKeyProvider } from "./secureVault";
+import type { InstallationEvidence } from "./settingsMigration";
 import { DEFAULT_SETTINGS, type AppSettings } from "../../shared/types";
 
 const settings: AppSettings = {
@@ -79,6 +80,44 @@ describe("HistoryStore settings migration", () => {
       launchAtStartup: true,
       startupDecisionVersion: 1,
       sensitiveFilterEnabled: false
+    });
+  });
+
+  test("preserves observed legacy evidence when settings disappear before reading", async () => {
+    const settingsPath = join(dir, "settings.json");
+    await writeFile(settingsPath, JSON.stringify({ captureEnabled: true }), "utf8");
+    const target = new HistoryStore(dir, keyProvider);
+    const internals = target as unknown as {
+      detectInstallationEvidence(): Promise<InstallationEvidence>;
+    };
+    const detectEvidence = internals.detectInstallationEvidence.bind(internals);
+    const detectionSpy = vi.spyOn(internals, "detectInstallationEvidence").mockImplementation(async () => {
+      const evidence = await detectEvidence();
+      expect(evidence).toEqual({
+        settingsExists: true,
+        settingsCorrupt: false,
+        historyExists: false,
+        vaultKeyExists: false,
+        contentExists: false
+      });
+      await rm(settingsPath);
+      return evidence;
+    });
+
+    try {
+      await target.init();
+    } finally {
+      detectionSpy.mockRestore();
+    }
+
+    expect(await target.getSettings()).toMatchObject({
+      launchAtStartup: false,
+      startupDecisionVersion: 0,
+      sensitiveFilterEnabled: false
+    });
+    await expect(readPersistedSettings()).resolves.toMatchObject({
+      launchAtStartup: false,
+      startupDecisionVersion: 0
     });
   });
 
