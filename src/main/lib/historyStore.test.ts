@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { HistoryStore } from "./historyStore";
 import { MemoryKeyProvider } from "./secureVault";
-import type { AppSettings } from "../../shared/types";
+import { DEFAULT_SETTINGS, type AppSettings } from "../../shared/types";
 
 const settings: AppSettings = {
   captureEnabled: true,
@@ -14,8 +14,154 @@ const settings: AppSettings = {
   maxImageBytes: 10,
   hotkey: "Ctrl+Alt+V",
   launchAtStartup: false,
+  startupDecisionVersion: 1,
   sensitiveFilterEnabled: true
 };
+
+describe("HistoryStore settings migration", () => {
+  let dir: string;
+  let keyProvider: MemoryKeyProvider;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "history-clipboard-settings-"));
+    keyProvider = new MemoryKeyProvider(Buffer.alloc(32, 8));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function initialize(): Promise<HistoryStore> {
+    const target = new HistoryStore(dir, keyProvider);
+    await target.init();
+    return target;
+  }
+
+  async function readPersistedSettings(): Promise<Record<string, unknown>> {
+    return JSON.parse(await readFile(join(dir, "settings.json"), "utf8")) as Record<string, unknown>;
+  }
+
+  test("treats a root without pre-existing content as a new installation", async () => {
+    const target = await initialize();
+
+    expect(await target.getSettings()).toEqual(DEFAULT_SETTINGS);
+    expect(await readPersistedSettings()).toMatchObject({
+      launchAtStartup: true,
+      startupDecisionVersion: 1,
+      sensitiveFilterEnabled: false
+    });
+  });
+
+  test.each([
+    ["disabled", { launchAtStartup: false, sensitiveFilterEnabled: true }],
+    ["missing", { captureEnabled: false, sensitiveFilterEnabled: true }]
+  ])("keeps legacy %s startup settings pending a decision", async (_name, legacySettings) => {
+    await writeFile(join(dir, "settings.json"), JSON.stringify(legacySettings), "utf8");
+
+    const target = await initialize();
+
+    expect(await target.getSettings()).toMatchObject({
+      launchAtStartup: false,
+      startupDecisionVersion: 0,
+      sensitiveFilterEnabled: false
+    });
+  });
+
+  test("migrates a legacy enabled startup setting to version 1", async () => {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({
+      launchAtStartup: true,
+      sensitiveFilterEnabled: true
+    }), "utf8");
+
+    const target = await initialize();
+
+    expect(await target.getSettings()).toMatchObject({
+      launchAtStartup: true,
+      startupDecisionVersion: 1,
+      sensitiveFilterEnabled: false
+    });
+  });
+
+  test.each([
+    ["history", async (rootDir: string) => {
+      await writeFile(join(rootDir, "history.json"), JSON.stringify({
+        version: 1,
+        revision: 0,
+        items: []
+      }), "utf8");
+    }],
+    ["vault key", async (rootDir: string) => {
+      await writeFile(join(rootDir, "vault.key"), "existing-key", "utf8");
+    }],
+    ["content directory", async (rootDir: string) => {
+      await mkdir(join(rootDir, "content"));
+    }]
+  ] satisfies Array<readonly [string, (rootDir: string) => Promise<void>]>) (
+    "repairs corrupt settings conservatively with only %s evidence",
+    async (_name, createEvidence) => {
+      await writeFile(join(dir, "settings.json"), "{", "utf8");
+      await createEvidence(dir);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      try {
+        const target = await initialize();
+        expect(await target.getSettings()).toMatchObject({
+          launchAtStartup: false,
+          startupDecisionVersion: 0,
+          sensitiveFilterEnabled: false
+        });
+      } finally {
+        errorSpy.mockRestore();
+      }
+    }
+  );
+
+  test("does not rewrite a valid version 1 settings file", async () => {
+    const existingSettings: AppSettings = {
+      captureEnabled: false,
+      maxItems: 250,
+      retentionDays: 14,
+      maxTextLength: 12_000,
+      maxImageBytes: 2 * 1024 * 1024,
+      hotkey: "Ctrl+Shift+V",
+      launchAtStartup: false,
+      startupDecisionVersion: 1,
+      sensitiveFilterEnabled: true
+    };
+    const settingsPath = join(dir, "settings.json");
+    await writeFile(settingsPath, JSON.stringify(existingSettings), "utf8");
+    const stableTime = new Date("2001-02-03T04:05:06.000Z");
+    await utimes(settingsPath, stableTime, stableTime);
+    const before = await stat(settingsPath);
+
+    const target = await initialize();
+    const after = await stat(settingsPath);
+
+    expect(await target.getSettings()).toEqual(existingSettings);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
+  test("repairs corrupt settings without losing loadable history", async () => {
+    const original = await initialize();
+    await original.addText("alpha");
+    await original.flush();
+    await writeFile(join(dir, "settings.json"), "{", "utf8");
+
+    const reloaded = await initialize();
+
+    expect(await reloaded.getSettings()).toMatchObject({
+      launchAtStartup: false,
+      startupDecisionVersion: 0,
+      sensitiveFilterEnabled: false
+    });
+    await expect(reloaded.list()).resolves.toMatchObject([
+      { type: "text", text: "alpha" }
+    ]);
+    await expect(readPersistedSettings()).resolves.toMatchObject({
+      startupDecisionVersion: 0
+    });
+  });
+});
 
 describe("HistoryStore", () => {
   let dir: string;

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { hashBytes } from "../../shared/hash";
 import { DEFAULT_SETTINGS, type AppSettings, type ClipboardContent, type HistoryFilterType, type HistoryItem, type HistoryQuery, type HistoryResult, type HistoryType, type StorageStats } from "../../shared/types";
 import { HistoryMetadataJournal, type StoredImageItem, type StoredItem } from "./historyMetadata";
 import type { ContentKeyProvider } from "./secureVault";
 import { FileContentVault } from "./secureVault";
+import { migrateSettings, type InstallationEvidence } from "./settingsMigration";
 import { shouldRecordText } from "./textFilter";
 
 type HistoryStoreOptions = {
@@ -55,13 +57,13 @@ export class HistoryStore {
   }
 
   private async initInternal(): Promise<void> {
-    const contentExistedBeforeInit = await pathExists(this.contentDir);
+    const evidence = await this.detectInstallationEvidence();
     await mkdir(this.contentDir, { recursive: true });
-    await this.loadSettings();
+    await this.loadSettings(evidence);
     const loaded = await this.metadata.load();
     this.items = loaded.items;
     this.revision = loaded.revision;
-    this.metadataRecoverable = loaded.validCandidate || (!loaded.hadCandidates && !contentExistedBeforeInit);
+    this.metadataRecoverable = loaded.validCandidate || (!loaded.hadCandidates && !evidence.contentExists);
     this.cacheDirty = true;
     if (this.metadataRecoverable) {
       try {
@@ -562,12 +564,62 @@ export class HistoryStore {
     this.revision = await this.metadata.save(items);
   }
 
-  private async loadSettings(): Promise<void> {
-    try {
-      const parsed = JSON.parse(await readFile(this.settingsPath, "utf8")) as Partial<AppSettings>;
-      this.settings = { ...this.settings, ...parsed };
-    } catch {
-      await this.saveSettings(this.settings);
+  private async detectInstallationEvidence(): Promise<InstallationEvidence> {
+    const [settingsExists, historyExists, vaultKeyExists, contentExists] = await Promise.all([
+      pathExists(this.settingsPath),
+      pathExists(join(this.rootDir, "history.json")),
+      pathExists(join(this.rootDir, "vault.key")),
+      directoryExists(this.contentDir)
+    ]);
+
+    return {
+      settingsExists,
+      settingsCorrupt: false,
+      historyExists,
+      vaultKeyExists,
+      contentExists
+    };
+  }
+
+  private async loadSettings(evidence: InstallationEvidence): Promise<void> {
+    let raw: Partial<AppSettings> | undefined;
+    let needsRepair = !evidence.settingsExists;
+    let migrationEvidence = evidence;
+
+    if (evidence.settingsExists) {
+      try {
+        const parsed = JSON.parse(await readFile(this.settingsPath, "utf8")) as unknown;
+        if (isRecord(parsed)) {
+          raw = parsed as Partial<AppSettings>;
+        } else {
+          needsRepair = true;
+          migrationEvidence = { ...evidence, settingsCorrupt: true };
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          needsRepair = true;
+          migrationEvidence = { ...evidence, settingsExists: false };
+        } else if (error instanceof SyntaxError) {
+          needsRepair = true;
+          migrationEvidence = { ...evidence, settingsCorrupt: true };
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const migrationInput = raw ?? {
+      captureEnabled: this.settings.captureEnabled,
+      maxItems: this.settings.maxItems,
+      retentionDays: this.settings.retentionDays,
+      maxTextLength: this.settings.maxTextLength,
+      maxImageBytes: this.settings.maxImageBytes,
+      hotkey: this.settings.hotkey
+    };
+    const migrated = migrateSettings(migrationInput, migrationEvidence);
+    this.settings = migrated;
+    if (needsRepair || !isDeepStrictEqual(raw, migrated)) {
+      await this.saveSettings(migrated);
     }
   }
 
@@ -624,4 +676,19 @@ async function pathExists(path: string): Promise<boolean> {
     }
     throw error;
   }
+}
+
+async function directoryExists(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

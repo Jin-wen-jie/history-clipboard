@@ -51,6 +51,8 @@ export type HistoryQuery = {
   to?: string;
 };
 
+export const STARTUP_DECISION_VERSION = 1;
+
 export type AppSettings = {
   captureEnabled: boolean;
   maxItems: number;
@@ -59,6 +61,7 @@ export type AppSettings = {
   maxImageBytes: number;
   hotkey: string;
   launchAtStartup: boolean;
+  startupDecisionVersion: number;
   sensitiveFilterEnabled: boolean;
 };
 
@@ -99,6 +102,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   maxTextLength: 20_000,
   maxImageBytes: 10 * 1024 * 1024,
   hotkey: "Ctrl+Alt+V",
-  launchAtStartup: false,
-  sensitiveFilterEnabled: true
+  launchAtStartup: true,
+  startupDecisionVersion: STARTUP_DECISION_VERSION,
+  sensitiveFilterEnabled: false
 };
