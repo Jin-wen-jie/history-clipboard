@@ -28,6 +28,8 @@ export class HistoryStore {
   private metadataRecoverable = true;
   private items: StoredItem[] = [];
   private settings: AppSettings;
+  private mutationTail: Promise<void> = Promise.resolve();
+  private latestMutation: Promise<unknown> = Promise.resolve();
   /** Cache of fully-decrypted HistoryItem keyed by id */
   private itemCache = new Map<string, HistoryItem>();
   /** True when the cache is dirty relative to this.items — full rebuild needed */
@@ -49,6 +51,10 @@ export class HistoryStore {
   }
 
   async init(): Promise<void> {
+    return this.enqueueMutation(() => this.initInternal());
+  }
+
+  private async initInternal(): Promise<void> {
     const contentExistedBeforeInit = await pathExists(this.contentDir);
     await mkdir(this.contentDir, { recursive: true });
     await this.loadSettings();
@@ -58,17 +64,27 @@ export class HistoryStore {
     this.metadataRecoverable = loaded.validCandidate || (!loaded.hadCandidates && !contentExistedBeforeInit);
     this.cacheDirty = true;
     if (this.metadataRecoverable) {
-      await this.vault.cleanupOrphans(this.referencedContentKeys());
+      try {
+        await this.vault.cleanupOrphans(this.referencedContentKeys());
+      } catch {
+        console.error("Encrypted content cleanup failed: orphan-cleanup");
+      }
     } else {
       console.error("Encrypted content cleanup skipped: metadata-unrecoverable");
     }
   }
 
   async flush(): Promise<void> {
+    const latestMutation = this.latestMutation;
+    await latestMutation;
     await this.metadata.flush();
   }
 
   async list(query: HistoryQuery = {}): Promise<HistoryItem[]> {
+    return this.enqueueMutation(() => this.listInternal(query));
+  }
+
+  private async listInternal(query: HistoryQuery): Promise<HistoryItem[]> {
     // Always check retention even if cached — it may remove items
     await this.enforceRetention();
 
@@ -118,6 +134,10 @@ export class HistoryStore {
   }
 
   async addText(text: string): Promise<HistoryResult> {
+    return this.enqueueMutation(() => this.addTextInternal(text));
+  }
+
+  private async addTextInternal(text: string): Promise<HistoryResult> {
     const decision = shouldRecordText(text, this.settings);
     if (!decision.ok) {
       return decision;
@@ -127,6 +147,10 @@ export class HistoryStore {
   }
 
   async addImage(input: ImageInput): Promise<HistoryResult> {
+    return this.enqueueMutation(() => this.addImageInternal(input));
+  }
+
+  private async addImageInternal(input: ImageInput): Promise<HistoryResult> {
     if (input.png.length === 0) {
       return { ok: false, reason: "blank" };
     }
@@ -157,24 +181,35 @@ export class HistoryStore {
   }
 
   async setPinned(id: string, pinned: boolean): Promise<boolean> {
+    return this.enqueueMutation(() => this.setPinnedInternal(id, pinned));
+  }
+
+  private async setPinnedInternal(id: string, pinned: boolean): Promise<boolean> {
     const item = this.items.find((candidate) => candidate.id === id);
     if (!item) {
       return false;
     }
 
-    item.pinned = pinned;
-    item.updatedAt = this.now();
-    // Update cache if the item is already cached
+    const updatedItem = { ...item, pinned, updatedAt: this.now() };
+    const nextItems = this.items.map((candidate) => candidate.id === id ? updatedItem : candidate);
+    await this.saveMetadata(nextItems);
+    this.items = nextItems;
     const cached = this.itemCache.get(id);
     if (cached) {
-      cached.pinned = pinned;
-      cached.updatedAt = item.updatedAt;
+      this.itemCache.set(id, {
+        ...cached,
+        pinned,
+        updatedAt: updatedItem.updatedAt
+      });
     }
-    await this.saveMetadata();
     return true;
   }
 
   async delete(id: string): Promise<boolean> {
+    return this.enqueueMutation(() => this.deleteInternal(id));
+  }
+
+  private async deleteInternal(id: string): Promise<boolean> {
     const item = this.items.find((candidate) => candidate.id === id);
     if (!item) {
       return false;
@@ -185,6 +220,10 @@ export class HistoryStore {
   }
 
   async deleteMany(ids: string[]): Promise<number> {
+    return this.enqueueMutation(() => this.deleteManyInternal(ids));
+  }
+
+  private async deleteManyInternal(ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
 
     const idSet = new Set(ids);
@@ -196,6 +235,10 @@ export class HistoryStore {
   }
 
   async clear(type: HistoryFilterType = "all"): Promise<void> {
+    return this.enqueueMutation(() => this.clearInternal(type));
+  }
+
+  private async clearInternal(type: HistoryFilterType): Promise<void> {
     const removed = this.items.filter((item) => type === "all" || item.type === type);
     await this.commitRemoval(removed);
   }
@@ -218,11 +261,16 @@ export class HistoryStore {
   }
 
   async updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
-    this.settings = { ...this.settings, ...patch };
-    await this.saveSettings();
+    return this.enqueueMutation(() => this.updateSettingsInternal(patch));
+  }
+
+  private async updateSettingsInternal(patch: Partial<AppSettings>): Promise<AppSettings> {
+    const nextSettings = { ...this.settings, ...patch };
+    await this.saveSettings(nextSettings);
+    this.settings = nextSettings;
     const retentionChanged = await this.enforceRetention();
     if (!retentionChanged) {
-      await this.saveMetadata();
+      await this.saveMetadata(this.items);
     }
     return this.getSettings();
   }
@@ -252,6 +300,10 @@ export class HistoryStore {
   }
 
   async importFromJson(json: string): Promise<{ imported: number; skipped: number }> {
+    return this.enqueueMutation(() => this.importFromJsonInternal(json));
+  }
+
+  private async importFromJsonInternal(json: string): Promise<{ imported: number; skipped: number }> {
     const data = JSON.parse(json) as { version?: number; items: HistoryItem[] };
     if (!Array.isArray(data.items)) throw new Error("Invalid backup format");
 
@@ -266,7 +318,7 @@ export class HistoryStore {
           skipped++;
           continue;
         }
-        const result = await this.addText(item.text);
+        const result = await this.addTextInternal(item.text);
         if (result.ok) imported++;
         else skipped++;
       } else if (item.type === "image") {
@@ -304,34 +356,45 @@ export class HistoryStore {
   ): Promise<HistoryResult> {
     const existing = this.items.find((item) => item.type === type && item.hash === hash);
     if (existing) {
-      existing.updatedAt = this.now();
-      existing.copyCount += 1;
-      // Update cache in-place instead of re-decrypting from disk
+      const updatedItem = {
+        ...existing,
+        updatedAt: this.now(),
+        copyCount: existing.copyCount + 1
+      } as StoredItem;
       const cached = this.itemCache.get(existing.id);
+      let publicItem: HistoryItem;
       if (cached) {
-        cached.updatedAt = existing.updatedAt;
-        cached.copyCount = existing.copyCount;
-        await this.saveMetadata();
-        return { ok: true, item: cached };
+        publicItem = {
+          ...cached,
+          updatedAt: updatedItem.updatedAt,
+          copyCount: updatedItem.copyCount
+        };
+      } else {
+        publicItem = await this.toPublicItem(updatedItem);
       }
-      // Not in cache — decrypt once for cache and return value
-      const pub = await this.toPublicItem(existing);
-      this.itemCache.set(existing.id, pub);
-      await this.saveMetadata();
-      return { ok: true, item: pub };
+      const nextItems = this.items.map((item) => item.id === existing.id ? updatedItem : item);
+      await this.saveMetadata(nextItems);
+      this.items = nextItems;
+      this.itemCache.set(existing.id, publicItem);
+      return { ok: true, item: publicItem };
     }
 
     const id = randomUUID();
     const item = createItem(id);
     await writeContent(item);
-    this.items.push(item);
-    // Decrypt once; cache it and return the same object
     const pub = await this.toPublicItem(item);
+    const candidateItems = [...this.items, item];
+    const removed = this.retentionItemsToRemove(candidateItems);
+    const removedIds = new Set(removed.map((removedItem) => removedItem.id));
+    const nextItems = candidateItems.filter((candidate) => !removedIds.has(candidate.id));
+    await this.saveMetadata(nextItems);
+    this.items = nextItems;
     this.itemCache.set(id, pub);
-    const retentionChanged = await this.enforceRetention();
-    if (!retentionChanged) {
-      await this.saveMetadata();
+    for (const removedId of removedIds) {
+      this.itemCache.delete(removedId);
+      this.invalidatedIds.delete(removedId);
     }
+    await this.cleanupRemovedContent(removed);
     return { ok: true, item: pub };
   }
 
@@ -429,12 +492,7 @@ export class HistoryStore {
   // ── Private: Retention ──
 
   private async enforceRetention(): Promise<boolean> {
-    const cutoff = this.currentRetentionCutoff();
-    const expired = this.items.filter((item) => Date.parse(item.updatedAt) < cutoff);
-    const expiredIds = new Set(expired.map((item) => item.id));
-    const retained = this.items.filter((item) => !expiredIds.has(item.id));
-    const newest = [...retained].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const removed = [...expired, ...newest.slice(this.settings.maxItems)];
+    const removed = this.retentionItemsToRemove(this.items);
     if (removed.length === 0) {
       return false;
     }
@@ -443,35 +501,51 @@ export class HistoryStore {
     return true;
   }
 
+  private retentionItemsToRemove(items: readonly StoredItem[]): StoredItem[] {
+    const cutoff = this.currentRetentionCutoff(this.settings.retentionDays);
+    const expired = items.filter((item) => Date.parse(item.updatedAt) < cutoff);
+    const expiredIds = new Set(expired.map((item) => item.id));
+    const retained = items.filter((item) => !expiredIds.has(item.id));
+    const newest = [...retained].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return [...expired, ...newest.slice(this.settings.maxItems)];
+  }
+
   private async commitRemoval(removed: StoredItem[]): Promise<void> {
     if (removed.length === 0) {
       return;
     }
 
     const removedIds = new Set(removed.map((item) => item.id));
-    this.items = this.items.filter((item) => !removedIds.has(item.id));
+    const nextItems = this.items.filter((item) => !removedIds.has(item.id));
+    await this.saveMetadata(nextItems);
+    this.items = nextItems;
     for (const id of removedIds) {
       this.itemCache.delete(id);
       this.invalidatedIds.delete(id);
     }
-    await this.saveMetadata();
 
+    await this.cleanupRemovedContent(removed);
+  }
+
+  private async cleanupRemovedContent(removed: StoredItem[]): Promise<void> {
     const cleanupResults = await Promise.allSettled(
-      removed.flatMap((item) => this.deleteContent(item))
+      removed.flatMap((item) => this.createContentDeletionTasks(item))
     );
     if (cleanupResults.some((result) => result.status === "rejected")) {
       console.error("Encrypted content cleanup failed");
     }
   }
 
-  private deleteContent(item: StoredItem): Promise<void>[] {
+  private createContentDeletionTasks(item: StoredItem): Promise<void>[] {
     const contentKeys = item.type === "image"
       ? [item.contentKey, item.thumbnailKey]
       : [item.contentKey];
-    return contentKeys.map((contentKey) => this.vault.delete(contentKey));
+    return contentKeys.map((contentKey) => {
+      return Promise.resolve().then(() => this.vault.delete(contentKey));
+    });
   }
 
-  private referencedContentKeys(): Set<string> {
+  private referencedContentKeys(): ReadonlySet<string> {
     const contentKeys = new Set<string>();
     for (const item of this.items) {
       contentKeys.add(item.contentKey);
@@ -484,8 +558,8 @@ export class HistoryStore {
 
   // ── Private: Persistence ──
 
-  private async saveMetadata(): Promise<void> {
-    this.revision = await this.metadata.save(this.items);
+  private async saveMetadata(items: readonly StoredItem[]): Promise<void> {
+    this.revision = await this.metadata.save(items);
   }
 
   private async loadSettings(): Promise<void> {
@@ -493,27 +567,37 @@ export class HistoryStore {
       const parsed = JSON.parse(await readFile(this.settingsPath, "utf8")) as Partial<AppSettings>;
       this.settings = { ...this.settings, ...parsed };
     } catch {
-      await this.saveSettings();
+      await this.saveSettings(this.settings);
     }
   }
 
-  private async saveSettings(): Promise<void> {
+  private async saveSettings(settings: AppSettings): Promise<void> {
     await mkdir(this.rootDir, { recursive: true });
     try {
       await copyFile(this.settingsPath, this.settingsPath + ".bak");
     } catch {
       // No existing file to back up — OK
     }
-    await writeFile(this.settingsPath, JSON.stringify(this.settings), "utf8");
+    await writeFile(this.settingsPath, JSON.stringify(settings), "utf8");
   }
 
   private now(): string {
     return (this.options.now?.() ?? new Date()).toISOString();
   }
 
-  private currentRetentionCutoff(): number {
+  private currentRetentionCutoff(retentionDays: number): number {
     const current = this.options.now?.() ?? new Date();
-    return current.getTime() - this.settings.retentionDays * 24 * 60 * 60 * 1000;
+    return current.getTime() - retentionDays * 24 * 60 * 60 * 1000;
+  }
+
+  private enqueueMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const result = this.mutationTail.then(mutation);
+    this.latestMutation = result;
+    this.mutationTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 }
 

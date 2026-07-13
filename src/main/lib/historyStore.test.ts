@@ -114,35 +114,95 @@ describe("HistoryStore", () => {
     expect(added.ok).toBe(true);
     if (!added.ok) throw new Error("expected text item");
 
-    let releaseDelete!: () => void;
-    const deleteGate = new Promise<void>((resolve) => {
-      releaseDelete = resolve;
+    const deleted = await expectMetadataCommittedBeforeCleanup(
+      store,
+      () => store.delete(added.item.id),
+      (metadata) => {
+        expect(metadata.items).toEqual([]);
+      }
+    );
+
+    expect(deleted).toBe(true);
+  });
+
+  test("keeps history available when deletion metadata commit fails", async () => {
+    const added = await store.addText("alpha");
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected text item");
+
+    const temporaryPath = join(dir, "history.json.tmp");
+    await mkdir(temporaryPath);
+    await expect(store.delete(added.item.id)).rejects.toBeDefined();
+    await rm(temporaryPath, { recursive: true });
+
+    await expect(store.list()).resolves.toMatchObject([
+      { id: added.item.id, type: "text", text: "alpha" }
+    ]);
+    await expect(store.getContent(added.item.id)).resolves.toEqual({
+      type: "text",
+      text: "alpha"
     });
-    const vault = (store as unknown as {
-      vault: { delete(id: string): Promise<void> };
-    }).vault;
-    const originalDelete = vault.delete.bind(vault);
-    vi.spyOn(vault, "delete").mockImplementation(async (id) => {
-      await deleteGate;
-      await originalDelete(id);
+
+    await expect(store.delete(added.item.id)).resolves.toBe(true);
+    await store.flush();
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+    await expect(reloaded.list()).resolves.toEqual([]);
+  });
+
+  test("queues a pin mutation behind an in-flight deletion commit", async () => {
+    const added = await store.addText("alpha");
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected text item");
+
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const metadata = (store as unknown as {
+      metadata: { save(items: readonly unknown[]): Promise<number> };
+    }).metadata;
+    const originalSave = metadata.save.bind(metadata);
+    const saveSpy = vi.spyOn(metadata, "save").mockImplementation(async (items) => {
+      markSaveStarted();
+      await saveGate;
+      return originalSave(items);
     });
 
     const deletion = store.delete(added.item.id);
-    let orderingError: unknown;
+    await saveStarted;
+    let pinSettled = false;
+    const pinning = store.setPinned(added.item.id, true).then(
+      (result) => {
+        pinSettled = true;
+        return result;
+      },
+      (error) => {
+        pinSettled = true;
+        throw error;
+      }
+    );
+
     try {
-      await vi.waitFor(async () => {
-        const metadata = JSON.parse(await readFile(join(dir, "history.json"), "utf8"));
-        expect(metadata.items).toEqual([]);
-      });
-    } catch (error) {
-      orderingError = error;
+      await Promise.resolve();
+      expect(pinSettled).toBe(false);
     } finally {
-      releaseDelete();
+      releaseSave();
+      await Promise.allSettled([deletion, pinning]);
+      saveSpy.mockRestore();
     }
 
-    const deleted = await deletion;
-    if (orderingError) throw orderingError;
-    expect(deleted).toBe(true);
+    await expect(deletion).resolves.toBe(true);
+    await expect(pinning).resolves.toBe(false);
+    await store.flush();
+    const metadataSnapshot = JSON.parse(
+      await readFile(join(dir, "history.json"), "utf8")
+    ) as MetadataSnapshot;
+    expect(metadataSnapshot.items).toEqual([]);
   });
 
   test("deleteMany commits metadata before deleting encrypted content", async () => {
@@ -292,18 +352,26 @@ describe("HistoryStore", () => {
     const vault = (store as unknown as {
       vault: { delete(id: string): Promise<void> };
     }).vault;
-    const deleteSpy = vi.spyOn(vault, "delete").mockImplementation(async (id) => {
+    const deleteSpy = vi.spyOn(vault, "delete").mockImplementation((id) => {
       if (id.endsWith(".image")) {
         throw new Error("content cleanup failed");
       }
-      await thumbnailGate;
+      return thumbnailGate;
     });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     let settled = false;
-    const deletion = store.delete(added.item.id).then((result) => {
-      settled = true;
-      return result;
-    });
+    let deletionError: unknown;
+    const deletion = store.delete(added.item.id).then(
+      (result) => {
+        settled = true;
+        return result;
+      },
+      (error) => {
+        settled = true;
+        deletionError = error;
+        return false;
+      }
+    );
 
     try {
       await vi.waitFor(() => expect(deleteSpy).toHaveBeenCalledTimes(2));
@@ -311,11 +379,15 @@ describe("HistoryStore", () => {
       expect(settled).toBe(false);
     } finally {
       releaseThumbnail();
-      await deletion;
-      errorSpy.mockRestore();
-      deleteSpy.mockRestore();
+      try {
+        await deletion;
+      } finally {
+        errorSpy.mockRestore();
+        deleteSpy.mockRestore();
+      }
     }
 
+    expect(deletionError).toBeUndefined();
     await expect(deletion).resolves.toBe(true);
   });
 
@@ -324,9 +396,10 @@ describe("HistoryStore", () => {
     expect(added.ok).toBe(true);
     if (!added.ok) throw new Error("expected text item");
 
-    void store.setPinned(added.item.id, true);
-    void store.setPinned(added.item.id, false);
+    const firstMutation = store.setPinned(added.item.id, true);
+    const secondMutation = store.setPinned(added.item.id, false);
     await store.flush();
+    await Promise.all([firstMutation, secondMutation]);
 
     const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
     await reloaded.init();
@@ -360,6 +433,43 @@ describe("HistoryStore", () => {
     });
   });
 
+  test("continues initialization when recoverable orphan cleanup fails", async () => {
+    await store.addText("alpha");
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    const vault = (reloaded as unknown as {
+      vault: { cleanupOrphans(ids: ReadonlySet<string>): Promise<number> };
+    }).vault;
+    const cleanupSpy = vi.spyOn(vault, "cleanupOrphans").mockRejectedValue(
+      new Error(`orphan cleanup failed at ${dir}`)
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(reloaded.init()).resolves.toBeUndefined();
+      await expect(reloaded.list()).resolves.toMatchObject([
+        { type: "text", text: "alpha" }
+      ]);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith("Encrypted content cleanup failed: orphan-cleanup");
+    } finally {
+      errorSpy.mockRestore();
+      cleanupSpy.mockRestore();
+    }
+
+    const retried = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    const retryVault = (retried as unknown as {
+      vault: { cleanupOrphans(ids: ReadonlySet<string>): Promise<number> };
+    }).vault;
+    const retrySpy = vi.spyOn(retryVault, "cleanupOrphans");
+    try {
+      await retried.init();
+      expect(retrySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      retrySpy.mockRestore();
+    }
+  });
+
   test("preserves orphan blobs when every metadata candidate is corrupt", async () => {
     const orphanPath = join(dir, "content", "orphan.text.bin");
     await writeFile(orphanPath, Buffer.from([1, 2, 3]));
@@ -368,13 +478,19 @@ describe("HistoryStore", () => {
     await writeFile(join(dir, "history.json.bak"), JSON.stringify({ version: 2, items: [] }), "utf8");
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    const vault = (reloaded as unknown as {
+      vault: { cleanupOrphans(ids: ReadonlySet<string>): Promise<number> };
+    }).vault;
+    const cleanupSpy = vi.spyOn(vault, "cleanupOrphans");
     try {
-      const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
       await reloaded.init();
 
       await expect(readFile(orphanPath)).resolves.toEqual(Buffer.from([1, 2, 3]));
+      expect(cleanupSpy).not.toHaveBeenCalled();
       expect(errorSpy).toHaveBeenCalledWith("Encrypted content cleanup skipped: metadata-unrecoverable");
     } finally {
+      cleanupSpy.mockRestore();
       errorSpy.mockRestore();
     }
   });
