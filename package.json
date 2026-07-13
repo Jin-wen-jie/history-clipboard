@@ -10,6 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsc --noEmit && electron-vite build",
+    "build:helper": "node scripts/buildClipboardListener.cjs",
+    "test:helper": "node scripts/buildClipboardListener.cjs --tests && build\\clipboard-listener-tests.exe",
     "dist": "electron-builder --win nsis"
   },
   "dependencies": {
