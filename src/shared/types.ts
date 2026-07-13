@@ -2,6 +2,23 @@ export type HistoryType = "text" | "image";
 
 export type HistoryFilterType = "all" | HistoryType;
 
+export type ClipboardBackgroundMode = "starting" | "listening" | "fallback" | "paused" | "stopped";
+export type ClipboardBackgroundState = {
+  mode: ClipboardBackgroundMode;
+  helperPid: number | null;
+  helperGeneration: number;
+  lastEventAt: number | null;
+  lastSequence: number | null;
+  restartCount: number;
+  nextRestartAt: number | null;
+  gapCount: number;
+  filteredCount: number;
+  queueDepth: number;
+  queueBytes: number;
+  lastExit: { code: number | null; signal: string | null } | null;
+  lastError: string | null;
+};
+
 export type TextHistoryItem = {
   id: string;
   type: "text";
