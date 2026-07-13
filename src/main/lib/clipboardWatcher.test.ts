@@ -184,6 +184,256 @@ describe("ClipboardWatcher", () => {
     expect(persisted).toEqual(["A", "C"]);
   });
 
+  test("mixed queue keeps a pending poll before a later native snapshot", async () => {
+    let clipboardText = "A";
+    let releaseFirst!: () => void;
+    let releasePending!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const pendingBlocked = new Promise<void>((resolve) => {
+      releasePending = resolve;
+    });
+    const started: string[] = [];
+    const persisted: string[] = [];
+    const addText = vi.fn(async (text: string) => {
+      started.push(text);
+      if (text === "A") {
+        await firstBlocked;
+      } else if (text === "B") {
+        await pendingBlocked;
+      }
+      persisted.push(text);
+      return addedText(text);
+    });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => clipboardText,
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
+    });
+
+    let firstDone = false;
+    const first = watcher.reconcileOnce().then(() => {
+      firstDone = true;
+    });
+    await vi.waitFor(() => expect(started).toEqual(["A"]));
+    clipboardText = "B";
+    let pendingDone = false;
+    const pending = watcher.reconcileOnce().then(() => {
+      pendingDone = true;
+    });
+    let nativeDone = false;
+    const native = watcher.captureNative({ text: "N" }).then(() => {
+      nativeDone = true;
+    });
+
+    await Promise.resolve();
+    expect([firstDone, pendingDone, nativeDone]).toEqual([false, false, false]);
+    releaseFirst();
+    await vi.waitFor(() => expect(started).toContain("B"));
+    const beforePendingRelease = {
+      started: [...started],
+      firstDone,
+      pendingDone,
+      nativeDone
+    };
+
+    releasePending();
+    await Promise.all([first, pending, native]);
+
+    expect(beforePendingRelease).toEqual({
+      started: ["A", "B"],
+      firstDone: true,
+      pendingDone: false,
+      nativeDone: false
+    });
+    expect(persisted).toEqual(["A", "B", "N"]);
+    expect(watcher.getQueueState()).toEqual({ depth: 0, bytes: 0, backpressured: false });
+  });
+
+  test("mixed queue moves a replaced pending poll behind intervening native work", async () => {
+    let clipboardText = "A";
+    let releaseFirst!: () => void;
+    let releaseLatest!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const latestBlocked = new Promise<void>((resolve) => {
+      releaseLatest = resolve;
+    });
+    const started: string[] = [];
+    const persisted: string[] = [];
+    const addText = vi.fn(async (text: string) => {
+      started.push(text);
+      if (text === "A") {
+        await firstBlocked;
+      } else if (text === "C") {
+        await latestBlocked;
+      }
+      persisted.push(text);
+      return addedText(text);
+    });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => clipboardText,
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
+    });
+
+    const first = watcher.reconcileOnce();
+    await vi.waitFor(() => expect(started).toEqual(["A"]));
+    clipboardText = "B";
+    const pending = watcher.reconcileOnce();
+    const native = watcher.captureNative({ text: "N" });
+    clipboardText = "C";
+    const replaced = watcher.reconcileOnce();
+    expect(replaced).toBe(pending);
+    expect(watcher.getQueueState()).toEqual({ depth: 3, bytes: 3, backpressured: false });
+
+    let pendingDone = false;
+    void pending.then(() => {
+      pendingDone = true;
+    });
+    let replacedDone = false;
+    void replaced.then(() => {
+      replacedDone = true;
+    });
+    releaseFirst();
+    await vi.waitFor(() => expect(started).toContain("C"));
+    const beforeLatestRelease = {
+      started: [...started],
+      pendingDone,
+      replacedDone
+    };
+
+    releaseLatest();
+    await Promise.all([first, pending, native, replaced]);
+
+    expect(beforeLatestRelease).toEqual({
+      started: ["A", "N", "C"],
+      pendingDone: false,
+      replacedDone: false
+    });
+    expect(persisted).toEqual(["A", "N", "C"]);
+    expect(watcher.getQueueState()).toEqual({ depth: 0, bytes: 0, backpressured: false });
+  });
+
+  test("mixed queue continues pending poll and native work after active poll failure", async () => {
+    let clipboardText = "A";
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started: string[] = [];
+    const persisted: string[] = [];
+    const transitions: boolean[] = [];
+    const addText = vi.fn(async (text: string) => {
+      started.push(text);
+      if (text === "A") {
+        await firstBlocked;
+        throw new Error("active poll failed");
+      }
+      persisted.push(text);
+      return addedText(text);
+    });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => clipboardText,
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn(),
+      highWaterItems: 2,
+      lowWaterItems: 0,
+      onBackpressureChange: (paused) => transitions.push(paused)
+    });
+
+    const first = watcher.reconcileOnce();
+    const firstFailure = expect(first).rejects.toThrow("active poll failed");
+    await vi.waitFor(() => expect(started).toEqual(["A"]));
+    clipboardText = "B";
+    const pending = watcher.reconcileOnce();
+    const native = watcher.captureNative({ text: "N" });
+    const drain = watcher.drain();
+
+    releaseFirst();
+    await Promise.all([firstFailure, pending, native, drain]);
+
+    expect(started).toEqual(["A", "B", "N"]);
+    expect(persisted).toEqual(["B", "N"]);
+    expect(transitions).toEqual([true, false]);
+    expect(watcher.getQueueState()).toEqual({ depth: 0, bytes: 0, backpressured: false });
+  });
+
+  test("stop drains the final native item in a mixed queue", async () => {
+    let clipboardText = "A";
+    let releaseFirst!: () => void;
+    let releaseNative!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const nativeBlocked = new Promise<void>((resolve) => {
+      releaseNative = resolve;
+    });
+    const started: string[] = [];
+    const addText = vi.fn(async (text: string) => {
+      started.push(text);
+      if (text === "A") {
+        await firstBlocked;
+      } else if (text === "N") {
+        await nativeBlocked;
+      }
+      return addedText(text);
+    });
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => clipboardText,
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn()
+    });
+
+    const first = watcher.reconcileOnce();
+    await vi.waitFor(() => expect(started).toEqual(["A"]));
+    clipboardText = "B";
+    let pendingDone = false;
+    const pending = watcher.reconcileOnce().then(() => {
+      pendingDone = true;
+    });
+    let nativeDone = false;
+    const native = watcher.captureNative({ text: "N" }).then(() => {
+      nativeDone = true;
+    });
+    watcher.stop();
+    let drained = false;
+    const drain = watcher.drain().then(() => {
+      drained = true;
+    });
+
+    releaseFirst();
+    await vi.waitFor(() => expect(started).toContain("N"));
+    await Promise.resolve();
+    const beforeNativeRelease = {
+      started: [...started],
+      pendingDone,
+      nativeDone,
+      drained
+    };
+
+    releaseNative();
+    await Promise.all([first, pending, native, drain]);
+
+    expect(beforeNativeRelease).toEqual({
+      started: ["A", "B", "N"],
+      pendingDone: true,
+      nativeDone: false,
+      drained: false
+    });
+    expect(watcher.getQueueState()).toEqual({ depth: 0, bytes: 0, backpressured: false });
+  });
+
   test("stop still drains a coalesced poll after the active poll fails", async () => {
     let clipboardText = "A";
     let releaseFirst!: () => void;

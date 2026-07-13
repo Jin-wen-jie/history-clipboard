@@ -36,7 +36,7 @@ type CaptureQueueItem = {
   force: boolean;
 };
 
-type CoalescedPoll = CaptureQueueItem & {
+type CaptureQueueEntry = CaptureQueueItem & {
   promise: Promise<void>;
   resolve: () => void;
   reject: (reason?: unknown) => void;
@@ -64,8 +64,8 @@ function snapshotBytes(snapshot: ClipboardSnapshot): number {
  *
  * Architecture:
  *   - Native snapshots are never hash-deduplicated or silently dropped.
- *   - Poll observations share the same Promise tail and coalesce to one pending
- *     snapshot while an earlier poll is in flight.
+ *   - One FIFO worker serializes both sources; one unstarted poll may be
+ *     replaced and moved to the tail as newer observations arrive.
  *   - Queue watermarks expose backpressure without concurrent store calls.
  */
 export class ClipboardWatcher {
@@ -74,8 +74,9 @@ export class ClipboardWatcher {
   private lastTextKey?: string;
   private rejectedImageKey?: string;
   private rejectedTextKey?: string;
-  /** Serial execution tail — each capture waits for the previous one. */
-  private tail: Promise<void> = Promise.resolve();
+  private readonly queue: CaptureQueueEntry[] = [];
+  private processing?: CaptureQueueEntry;
+  private pendingPoll?: CaptureQueueEntry;
   /** Number of captures currently enqueued (used for backpressure). */
   private pendingCaptures = 0;
   private pendingBytes = 0;
@@ -84,8 +85,6 @@ export class ClipboardWatcher {
   private readonly lowWaterItems: number;
   private readonly highWaterBytes: number;
   private readonly lowWaterBytes: number;
-  private pollInFlight = false;
-  private coalescedPoll?: CoalescedPoll;
   private accepting = true;
 
   constructor(private readonly options: ClipboardWatcherOptions) {
@@ -160,7 +159,9 @@ export class ClipboardWatcher {
     if (!this.accepting) {
       return Promise.resolve();
     }
-    return this.enqueue(this.createQueueItem("native", snapshot, false));
+    const entry = this.createQueueEntry("native", snapshot, false);
+    this.enqueue(entry);
+    return entry.promise;
   }
 
   /**
@@ -168,9 +169,10 @@ export class ClipboardWatcher {
    * Useful during graceful shutdown.
    */
   drain(): Promise<void> {
-    const tail = this.tail;
-    const coalesced = this.coalescedPoll?.promise.catch(() => undefined);
-    return coalesced ? Promise.all([tail, coalesced]).then(() => undefined) : tail;
+    const entries = this.processing ? [this.processing, ...this.queue] : [...this.queue];
+    return Promise.all(entries.map((entry) => entry.promise.catch(() => undefined))).then(
+      () => undefined
+    );
   }
 
   getQueueState(): CaptureQueueState {
@@ -200,94 +202,97 @@ export class ClipboardWatcher {
     };
   }
 
-  private createQueueItem(
+  private createQueueEntry(
     source: "native" | "poll",
     snapshot: ClipboardSnapshot,
     force: boolean
-  ): CaptureQueueItem {
-    return { source, snapshot, bytes: snapshotBytes(snapshot), force };
-  }
-
-  private enqueue(item: CaptureQueueItem, accounted = false): Promise<void> {
-    const previousTail = this.tail;
-    if (!accounted) {
-      this.pendingCaptures += 1;
-      this.pendingBytes += item.bytes;
-    }
-
-    const capture = previousTail.then(() => this.processSnapshot(item));
-
-    const completed = capture.finally(() => {
-      this.pendingCaptures -= 1;
-      this.pendingBytes = Math.max(0, this.pendingBytes - item.bytes);
-      this.notifyQueueChange();
-    });
-
-    this.tail = completed.catch(() => undefined);
-
-    if (!accounted) {
-      this.notifyQueueChange();
-    }
-
-    return completed;
-  }
-
-  private enqueuePoll(snapshot: ClipboardSnapshot, force: boolean): Promise<void> {
-    const item = this.createQueueItem("poll", snapshot, force);
-    if (!this.pollInFlight) {
-      this.pollInFlight = true;
-      const capture = this.enqueue(item);
-      capture.then(
-        () => this.advancePoll(),
-        () => this.advancePoll()
-      );
-      return capture;
-    }
-
-    if (this.coalescedPoll) {
-      this.pendingBytes = Math.max(
-        0,
-        this.pendingBytes - this.coalescedPoll.bytes + item.bytes
-      );
-      this.coalescedPoll.snapshot = item.snapshot;
-      this.coalescedPoll.bytes = item.bytes;
-      this.coalescedPoll.force ||= item.force;
-      this.notifyQueueChange();
-      return this.coalescedPoll.promise;
-    }
-
+  ): CaptureQueueEntry {
     let resolve!: () => void;
     let reject!: (reason?: unknown) => void;
     const promise = new Promise<void>((resolvePromise, rejectPromise) => {
       resolve = resolvePromise;
       reject = rejectPromise;
     });
-    this.coalescedPoll = { ...item, promise, resolve, reject };
-    this.pendingCaptures += 1;
-    this.pendingBytes += item.bytes;
-    this.notifyQueueChange();
-    return promise;
+    return {
+      source,
+      snapshot,
+      bytes: snapshotBytes(snapshot),
+      force,
+      promise,
+      resolve,
+      reject
+    };
   }
 
-  private advancePoll(): void {
-    const pending = this.coalescedPoll;
-    if (!pending) {
-      this.pollInFlight = false;
+  private enqueue(entry: CaptureQueueEntry): void {
+    this.queue.push(entry);
+    this.pendingCaptures += 1;
+    this.pendingBytes += entry.bytes;
+    this.startNext();
+    this.notifyQueueChange();
+  }
+
+  private enqueuePoll(snapshot: ClipboardSnapshot, force: boolean): Promise<void> {
+    if (this.pendingPoll) {
+      const bytes = snapshotBytes(snapshot);
+      this.pendingBytes = Math.max(
+        0,
+        this.pendingBytes - this.pendingPoll.bytes + bytes
+      );
+      this.pendingPoll.snapshot = snapshot;
+      this.pendingPoll.bytes = bytes;
+      this.pendingPoll.force ||= force;
+
+      const index = this.queue.indexOf(this.pendingPoll);
+      this.queue.splice(index, 1);
+      this.queue.push(this.pendingPoll);
+      this.notifyQueueChange();
+      return this.pendingPoll.promise;
+    }
+
+    const item = this.createQueueEntry("poll", snapshot, force);
+    this.pendingPoll = item;
+    this.enqueue(item);
+    return item.promise;
+  }
+
+  private startNext(): void {
+    if (this.processing) {
       return;
     }
 
-    this.coalescedPoll = undefined;
-    const capture = this.enqueue(pending, true);
-    capture.then(
-      () => {
-        pending.resolve();
-        this.advancePoll();
-      },
-      (error) => {
-        pending.reject(error);
-        this.advancePoll();
-      }
-    );
+    const entry = this.queue.shift();
+    if (!entry) {
+      return;
+    }
+
+    this.processing = entry;
+    if (this.pendingPoll === entry) {
+      this.pendingPoll = undefined;
+    }
+    void this.processEntry(entry);
+  }
+
+  private async processEntry(entry: CaptureQueueEntry): Promise<void> {
+    let failed = false;
+    let failure: unknown;
+    try {
+      await this.processSnapshot(entry);
+    } catch (error) {
+      failed = true;
+      failure = error;
+    }
+
+    this.processing = undefined;
+    this.pendingCaptures -= 1;
+    this.pendingBytes = Math.max(0, this.pendingBytes - entry.bytes);
+    if (failed) {
+      entry.reject(failure);
+    } else {
+      entry.resolve();
+    }
+    this.startNext();
+    this.notifyQueueChange();
   }
 
   private notifyQueueChange(): void {
