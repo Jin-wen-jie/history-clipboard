@@ -24,6 +24,7 @@ namespace HistoryClipboard.ClipboardListener
         internal byte[] PngBytes { get; private set; }
         internal int PngWidth { get; private set; }
         internal int PngHeight { get; private set; }
+        internal long CapturedAt { get; private set; }
         internal string ErrorCode { get; private set; }
 
         internal static ClipboardSnapshotResult Busy(
@@ -48,6 +49,7 @@ namespace HistoryClipboard.ClipboardListener
             byte[] pngBytes,
             int pngWidth,
             int pngHeight,
+            long capturedAt,
             string errorCode)
         {
             ClipboardSnapshotResult result = new ClipboardSnapshotResult();
@@ -59,6 +61,7 @@ namespace HistoryClipboard.ClipboardListener
             result.PngBytes = pngBytes;
             result.PngWidth = pngWidth;
             result.PngHeight = pngHeight;
+            result.CapturedAt = capturedAt;
             result.ErrorCode = errorCode;
             return result;
         }
@@ -97,6 +100,7 @@ namespace HistoryClipboard.ClipboardListener
             byte[] unicodeBytes = null;
             RawImageData rawImage = null;
             uint after = observed;
+            long capturedAt = 0;
             string errorCode = null;
 
             try
@@ -104,6 +108,7 @@ namespace HistoryClipboard.ClipboardListener
                 ReadUnicodeText(out hasText, out unicodeBytes, ref errorCode);
                 rawImage = ReadImage(ref errorCode);
                 after = NativeMethods.GetClipboardSequenceNumber();
+                capturedAt = AgentFrame.CurrentUnixMilliseconds();
                 if (after != before)
                 {
                     sequenceAdvanced = true;
@@ -113,6 +118,7 @@ namespace HistoryClipboard.ClipboardListener
             {
                 MergeError(ref errorCode, "internal");
                 after = NativeMethods.GetClipboardSequenceNumber();
+                capturedAt = AgentFrame.CurrentUnixMilliseconds();
             }
             finally
             {
@@ -151,6 +157,7 @@ namespace HistoryClipboard.ClipboardListener
                 png == null ? null : png.Bytes,
                 png == null ? 0 : png.Width,
                 png == null ? 0 : png.Height,
+                capturedAt,
                 errorCode);
         }
 

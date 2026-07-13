@@ -196,6 +196,35 @@ describe("ClipboardAgentFrameParser", () => {
     }
   });
 
+  test("finishes cleanly when no partial frame remains", () => {
+    const parser = new ClipboardAgentFrameParser();
+    const header: AgentFrameHeader = { version: 1, type: "heartbeat", sequence: 7, at: 8 };
+
+    expect(parser.push(encodeFrame(header))).toEqual([header]);
+    expect(() => parser.finish()).not.toThrow();
+    expect(parser.push(encodeFrame(header))).toEqual([header]);
+  });
+
+  test("rejects trailing bytes after a complete frame and resets", () => {
+    const parser = new ClipboardAgentFrameParser();
+    const header: AgentFrameHeader = { version: 1, type: "heartbeat", sequence: 7, at: 8 };
+    const trailing = Buffer.from([1, 2, 3]);
+
+    expect(parser.push(Buffer.concat([encodeFrame(header), trailing]))).toEqual([header]);
+    expect(() => parser.finish()).toThrow("Incomplete frame");
+    expect(parser.push(encodeFrame(header))).toEqual([header]);
+  });
+
+  test("rejects an incomplete frame prefix and resets", () => {
+    const parser = new ClipboardAgentFrameParser();
+    const prefix = Buffer.alloc(4);
+    prefix.writeUInt32LE(100, 0);
+
+    expect(parser.push(prefix)).toEqual([]);
+    expect(() => parser.finish()).toThrow("Incomplete frame");
+    expect(() => parser.finish()).not.toThrow();
+  });
+
   test("parses text-only, image-only, and empty snapshots", () => {
     const text = Buffer.from("plain text", "utf8");
     const png = Buffer.from([1, 2, 3]);

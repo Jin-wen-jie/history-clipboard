@@ -352,6 +352,12 @@ export class ClipboardAgentFrameParser {
     }
   }
 
+  finish(): void {
+    if (this.bufferedBytes === 0) return;
+    this.reset();
+    throw new Error("Incomplete frame");
+  }
+
   reset(): void {
     this.chunks = [];
     this.headIndex = 0;

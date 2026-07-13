@@ -21,7 +21,8 @@ mkdirSync(buildDirectory, { recursive: true });
 
 const coreSources = [
   path.join(root, "native", "clipboard-listener", "AgentProtocol.cs"),
-  path.join(root, "native", "clipboard-listener", "ClipboardFrameQueue.cs")
+  path.join(root, "native", "clipboard-listener", "ClipboardFrameQueue.cs"),
+  path.join(root, "native", "clipboard-listener", "CaptureSequenceTracker.cs")
 ];
 const productionSources = coreSources.concat([
   path.join(root, "native", "clipboard-listener", "NativeMethods.cs"),

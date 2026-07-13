@@ -13,6 +13,9 @@ namespace HistoryClipboard.ClipboardListener
         private const int QueueFrameLimit = 64;
         private const int QueueByteLimit = 64 * 1024 * 1024;
         private const int HeartbeatIntervalMilliseconds = 5000;
+        private const int ShutdownPollIntervalMilliseconds = 100;
+        private const int WriterDrainTimeoutMilliseconds = 2000;
+        private const int WriterJoinTimeoutMilliseconds = 1000;
 
         private static readonly object QueueSync = new object();
         private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
@@ -24,11 +27,14 @@ namespace HistoryClipboard.ClipboardListener
         private static Stream _standardOutput;
         private static ClipboardListenerWindow _window;
         private static System.Windows.Forms.Timer _heartbeatTimer;
+        private static System.Windows.Forms.Timer _shutdownPollTimer;
         private static bool _accepting;
         private static bool _shutdownRequested;
         private static bool _uiShutdownStarted;
         private static bool _writerFailed;
+        private static bool _fatalFailure;
         private static uint _lastSequence;
+        private static CaptureSequenceTracker _captureSequenceTracker;
 
         [STAThread]
         private static int Main(string[] args)
@@ -43,12 +49,14 @@ namespace HistoryClipboard.ClipboardListener
                 }
                 else
                 {
-                    RunProduction();
+                    exitCode = RunProduction();
                 }
             }
             catch
             {
                 exitCode = 1;
+                MarkFatalFailure();
+                SetShutdownRequested();
                 TryEnqueueFixedError("internal", null, true);
             }
             finally
@@ -56,6 +64,10 @@ namespace HistoryClipboard.ClipboardListener
                 StopAcceptingFrames();
                 StopUiResources();
                 ShutdownWriter();
+                if (HasFatalFailure())
+                {
+                    exitCode = 1;
+                }
             }
             return exitCode;
         }
@@ -130,19 +142,10 @@ namespace HistoryClipboard.ClipboardListener
             }
         }
 
-        private static void RunProduction()
+        private static int RunProduction()
         {
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += OnUiThreadException;
-
-            SetAcceptingFrames(true);
-            uint readySequence = ReadCurrentSequence();
-            TryEnqueue(
-                AgentFrame.Ready(
-                    GetCurrentProcessId(),
-                    readySequence,
-                    AgentFrame.CurrentUnixMilliseconds()),
-                false);
 
             ClipboardSnapshotReader reader = new ClipboardSnapshotReader();
             try
@@ -153,9 +156,19 @@ namespace HistoryClipboard.ClipboardListener
             }
             catch
             {
-                TryEnqueueFixedError("listener-failed", readySequence, false);
-                return;
+                TryEnqueueFixedError("listener-failed", null, true);
+                return 1;
             }
+
+            uint readySequence = ReadCurrentSequence();
+            _captureSequenceTracker = new CaptureSequenceTracker(readySequence);
+            SetAcceptingFrames(true);
+            TryEnqueue(
+                AgentFrame.Ready(
+                    GetCurrentProcessId(),
+                    readySequence,
+                    AgentFrame.CurrentUnixMilliseconds()),
+                false);
 
             _heartbeatTimer = new System.Windows.Forms.Timer();
             _heartbeatTimer.Interval = HeartbeatIntervalMilliseconds;
@@ -168,6 +181,17 @@ namespace HistoryClipboard.ClipboardListener
                     false);
             };
             _heartbeatTimer.Start();
+
+            _shutdownPollTimer = new System.Windows.Forms.Timer();
+            _shutdownPollTimer.Interval = ShutdownPollIntervalMilliseconds;
+            _shutdownPollTimer.Tick += delegate
+            {
+                if (IsShutdownRequested())
+                {
+                    BeginUiShutdown();
+                }
+            };
+            _shutdownPollTimer.Start();
 
             Thread stdinThread = new Thread(StdinLoop);
             stdinThread.IsBackground = true;
@@ -185,6 +209,7 @@ namespace HistoryClipboard.ClipboardListener
             }
 
             Application.Run();
+            return HasFatalFailure() ? 1 : 0;
         }
 
         private static void OnClipboardChanged(ClipboardSnapshotReader reader)
@@ -196,9 +221,23 @@ namespace HistoryClipboard.ClipboardListener
 
             try
             {
+                uint observedSequence = ReadCurrentSequence();
+                CaptureSequenceObservation initial = _captureSequenceTracker.Classify(observedSequence);
+                if (initial.Kind == CaptureSequenceKind.Duplicate
+                    || initial.Kind == CaptureSequenceKind.Stale)
+                {
+                    return;
+                }
+
                 ClipboardSnapshotResult result = reader.TryCapture();
                 SetLastSequence(result.Sequence);
-                PublishCapture(result);
+                CaptureSequenceObservation captured = _captureSequenceTracker.Classify(result.Sequence);
+                if (captured.Kind == CaptureSequenceKind.Duplicate
+                    || captured.Kind == CaptureSequenceKind.Stale)
+                {
+                    return;
+                }
+                PublishCapture(result, captured);
             }
             catch
             {
@@ -206,7 +245,9 @@ namespace HistoryClipboard.ClipboardListener
             }
         }
 
-        private static void PublishCapture(ClipboardSnapshotResult result)
+        private static void PublishCapture(
+            ClipboardSnapshotResult result,
+            CaptureSequenceObservation observation)
         {
             long now = AgentFrame.CurrentUnixMilliseconds();
             if (result.IsClipboardBusy)
@@ -224,32 +265,39 @@ namespace HistoryClipboard.ClipboardListener
                 return;
             }
 
-            if (result.SequenceAdvanced)
+            if (result.ErrorCode != null)
             {
-                TryEnqueue(
+                TryEnqueueFixedError(result.ErrorCode, result.Sequence, false);
+                return;
+            }
+
+            if (observation.Kind == CaptureSequenceKind.Gap)
+            {
+                if (!TryEnqueue(
                     AgentFrame.Gap(
                         "sequence-advanced",
-                        result.BeforeSequence,
-                        result.Sequence,
-                        CalculateDropped(result.BeforeSequence, result.Sequence),
+                        observation.FromSequence,
+                        observation.ToSequence,
+                        observation.Dropped,
                         now),
-                    false);
+                    false))
+                {
+                    return;
+                }
             }
 
             AgentFrame snapshot;
             string buildError;
             if (TryBuildSnapshotFrame(result, out snapshot, out buildError))
             {
-                TryEnqueue(snapshot, false);
+                if (TryEnqueue(snapshot, false))
+                {
+                    _captureSequenceTracker.Commit(result.Sequence);
+                }
             }
             else
             {
                 TryEnqueueFixedError(buildError, result.Sequence, false);
-            }
-
-            if (result.ErrorCode != null)
-            {
-                TryEnqueueFixedError(result.ErrorCode, result.Sequence, false);
             }
         }
 
@@ -305,10 +353,11 @@ namespace HistoryClipboard.ClipboardListener
                         result.PngHeight);
                 frame = AgentFrame.Snapshot(
                     result.Sequence,
-                    AgentFrame.CurrentUnixMilliseconds(),
+                    result.CapturedAt,
                     payload,
                     textSegment,
                     pngSegment);
+                AgentProtocol.GetFrameLength(frame);
                 return true;
             }
             catch (OverflowException)
@@ -317,6 +366,11 @@ namespace HistoryClipboard.ClipboardListener
                 return false;
             }
             catch (OutOfMemoryException)
+            {
+                errorCode = "too-large";
+                return false;
+            }
+            catch (InvalidOperationException)
             {
                 errorCode = "too-large";
                 return false;
@@ -368,10 +422,7 @@ namespace HistoryClipboard.ClipboardListener
 
         private static void RequestShutdown()
         {
-            lock (QueueSync)
-            {
-                _shutdownRequested = true;
-            }
+            SetShutdownRequested();
             PostShutdownMessage();
         }
 
@@ -382,11 +433,15 @@ namespace HistoryClipboard.ClipboardListener
             {
                 return;
             }
-            NativeMethods.PostMessage(
+            bool posted = NativeMethods.PostMessage(
                 window.Handle,
                 (uint)NativeMethods.WM_AGENT_SHUTDOWN,
                 UIntPtr.Zero,
                 IntPtr.Zero);
+            if (!posted)
+            {
+                SetShutdownRequested();
+            }
         }
 
         private static void BeginUiShutdown()
@@ -396,16 +451,22 @@ namespace HistoryClipboard.ClipboardListener
                 return;
             }
             _uiShutdownStarted = true;
+            SetShutdownRequested();
             StopAcceptingFrames();
             if (_heartbeatTimer != null)
             {
                 _heartbeatTimer.Stop();
+            }
+            if (_shutdownPollTimer != null)
+            {
+                _shutdownPollTimer.Stop();
             }
             Application.ExitThread();
         }
 
         private static void OnUiThreadException(object sender, ThreadExceptionEventArgs arguments)
         {
+            MarkFatalFailure();
             TryEnqueueFixedError("internal", ReadCurrentSequence(), false);
             BeginUiShutdown();
         }
@@ -435,6 +496,10 @@ namespace HistoryClipboard.ClipboardListener
                 lock (QueueSync)
                 {
                     _writerFailed = true;
+                    if (!_shutdownRequested)
+                    {
+                        _fatalFailure = true;
+                    }
                     _writerDrained.Set();
                 }
                 RequestShutdown();
@@ -540,6 +605,12 @@ namespace HistoryClipboard.ClipboardListener
 
         private static void StopUiResources()
         {
+            if (_shutdownPollTimer != null)
+            {
+                _shutdownPollTimer.Stop();
+                _shutdownPollTimer.Dispose();
+                _shutdownPollTimer = null;
+            }
             if (_heartbeatTimer != null)
             {
                 _heartbeatTimer.Stop();
@@ -560,17 +631,59 @@ namespace HistoryClipboard.ClipboardListener
                 return;
             }
 
-            if (!_writerFailed)
+            if (!_writerFailed && !_writerDrained.WaitOne(WriterDrainTimeoutMilliseconds))
             {
-                _writerDrained.WaitOne();
+                try
+                {
+                    _standardOutput.Close();
+                }
+                catch
+                {
+                }
             }
             _writerCancellation.Cancel();
-            _writerThread.Join();
+            bool writerExited = _writerThread.Join(WriterJoinTimeoutMilliseconds);
+            if (!writerExited)
+            {
+                return;
+            }
 
             _standardOutput.Dispose();
             _writerCancellation.Dispose();
             _writerDrained.Dispose();
             _writerThread = null;
+        }
+
+        private static void SetShutdownRequested()
+        {
+            lock (QueueSync)
+            {
+                _shutdownRequested = true;
+            }
+        }
+
+        private static bool IsShutdownRequested()
+        {
+            lock (QueueSync)
+            {
+                return _shutdownRequested;
+            }
+        }
+
+        private static void MarkFatalFailure()
+        {
+            lock (QueueSync)
+            {
+                _fatalFailure = true;
+            }
+        }
+
+        private static bool HasFatalFailure()
+        {
+            lock (QueueSync)
+            {
+                return _fatalFailure;
+            }
         }
     }
 }

@@ -2,11 +2,14 @@ const { existsSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { inflateSync } = require("node:zlib");
 
 const READY_TIMEOUT_MS = 5000;
-const HEARTBEAT_TIMEOUT_MS = 7000;
+const HEARTBEAT_TIMEOUT_MS = 2000;
 const SELF_TEST_TIMEOUT_MS = 5000;
 const SHUTDOWN_TIMEOUT_MS = 3000;
+const BACKPRESSURE_SHUTDOWN_TIMEOUT_MS = 4000;
+const BACKPRESSURE_PING_COUNT = 30000;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 function fail(message) {
@@ -26,6 +29,17 @@ function createFrameCollector(child, ClipboardAgentFrameParser) {
   const frames = [];
   const waiters = [];
   let parseError;
+  let streamFinished = false;
+
+  function rejectWaiters(error) {
+    while (waiters.length > 0) waiters.shift().reject(error);
+  }
+
+  function failParsing(message) {
+    if (parseError) return;
+    parseError = new Error(message);
+    rejectWaiters(parseError);
+  }
 
   function settleWaiters() {
     for (let index = waiters.length - 1; index >= 0; index -= 1) {
@@ -44,15 +58,30 @@ function createFrameCollector(child, ClipboardAgentFrameParser) {
       frames.push(...parser.push(chunk));
       settleWaiters();
     } catch {
-      parseError = new Error("helper stdout contained an invalid protocol frame");
-      while (waiters.length > 0) waiters.shift().reject(parseError);
+      failParsing("helper stdout contained an invalid protocol frame");
     }
   });
+
+  function finishParser() {
+    if (streamFinished) return;
+    streamFinished = true;
+    try {
+      parser.finish();
+    } catch {
+      failParsing("helper stdout ended with an incomplete protocol frame");
+      return;
+    }
+    rejectWaiters(new Error("helper stdout ended before an expected protocol frame"));
+  }
+
+  child.stdout.once("end", finishParser);
+  child.stdout.once("close", finishParser);
 
   function waitFor(predicate) {
     if (parseError) return Promise.reject(parseError);
     const frame = frames.find(predicate);
     if (frame) return Promise.resolve(frame);
+    if (streamFinished) return Promise.reject(new Error("helper stdout ended before an expected protocol frame"));
     return new Promise((resolve, reject) => waiters.push({ predicate, resolve, reject }));
   }
 
@@ -71,8 +100,12 @@ function spawnHelper(executable, args, ClipboardAgentFrameParser) {
     child.once("error", () => reject(new Error("helper process could not be started")));
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
+  const processExit = new Promise((resolve, reject) => {
+    child.once("error", () => reject(new Error("helper process could not be started")));
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
   child.stdin.on("error", () => undefined);
-  return { child, collector, exit, stderrChunks };
+  return { child, collector, exit, processExit, stderrChunks };
 }
 
 function assertReady(frame, child) {
@@ -91,6 +124,7 @@ function assertCleanExit(result, stderrChunks, collector, mode) {
 async function stopChild(run) {
   if (run.child.exitCode === null && run.child.signalCode === null) {
     run.child.kill();
+    run.child.stdout.destroy();
     try {
       await withTimeout(run.exit, 1000, "helper cleanup timed out");
     } catch {
@@ -121,7 +155,6 @@ async function verifyProduction(executable, ClipboardAgentFrameParser) {
     );
 
     run.child.stdin.write("SHUTDOWN\n");
-    run.child.stdin.end();
     const result = await withTimeout(
       run.exit,
       SHUTDOWN_TIMEOUT_MS,
@@ -130,6 +163,106 @@ async function verifyProduction(executable, ClipboardAgentFrameParser) {
     assertCleanExit(result, run.stderrChunks, run.collector, "production");
   } finally {
     await stopChild(run);
+  }
+}
+
+async function verifyEof(executable, ClipboardAgentFrameParser) {
+  const run = spawnHelper(executable, [], ClipboardAgentFrameParser);
+  try {
+    const ready = await withTimeout(
+      run.collector.waitFor((frame) => frame.type === "ready"),
+      READY_TIMEOUT_MS,
+      "EOF helper timed out before ready"
+    );
+    assertReady(ready, run.child);
+    run.child.stdin.end();
+    const result = await withTimeout(
+      run.exit,
+      SHUTDOWN_TIMEOUT_MS,
+      "EOF helper timed out during shutdown"
+    );
+    assertCleanExit(result, run.stderrChunks, run.collector, "EOF");
+  } finally {
+    await stopChild(run);
+  }
+}
+
+async function verifyBackpressure(executable, ClipboardAgentFrameParser) {
+  const run = spawnHelper(executable, [], ClipboardAgentFrameParser);
+  try {
+    const ready = await withTimeout(
+      run.collector.waitFor((frame) => frame.type === "ready"),
+      READY_TIMEOUT_MS,
+      "backpressure helper timed out before ready"
+    );
+    assertReady(ready, run.child);
+
+    run.child.stdout.pause();
+    run.child.stdin.write("PING\n".repeat(BACKPRESSURE_PING_COUNT) + "SHUTDOWN\n");
+    const processResult = await withTimeout(
+      run.processExit,
+      BACKPRESSURE_SHUTDOWN_TIMEOUT_MS,
+      "backpressure helper timed out during shutdown"
+    );
+    run.child.stdout.destroy();
+    const closeResult = await withTimeout(
+      run.exit,
+      1000,
+      "backpressure helper pipes did not close"
+    );
+    if (processResult.code !== closeResult.code || processResult.signal !== closeResult.signal) {
+      fail("backpressure helper exit state was inconsistent");
+    }
+    assertCleanExit(closeResult, run.stderrChunks, run.collector, "backpressure");
+  } finally {
+    await stopChild(run);
+  }
+}
+
+function validatePngChunks(png) {
+  let offset = PNG_SIGNATURE.length;
+  let sawHeader = false;
+  let sawEnd = false;
+  const compressedParts = [];
+
+  while (offset < png.length) {
+    if (png.length - offset < 12) fail("self-test snapshot PNG contained a truncated chunk");
+    const dataLength = png.readUInt32BE(offset);
+    const chunkEnd = offset + 12 + dataLength;
+    if (!Number.isSafeInteger(chunkEnd) || chunkEnd > png.length) {
+      fail("self-test snapshot PNG chunk exceeded its boundary");
+    }
+
+    const type = png.toString("ascii", offset + 4, offset + 8);
+    const data = png.subarray(offset + 8, offset + 8 + dataLength);
+    if (!sawHeader) {
+      if (type !== "IHDR" || dataLength !== 13) {
+        fail("self-test snapshot PNG did not start with IHDR");
+      }
+      sawHeader = true;
+    } else if (type === "IHDR") {
+      fail("self-test snapshot PNG contained multiple IHDR chunks");
+    }
+
+    if (type === "IDAT") compressedParts.push(data);
+    if (type === "IEND") {
+      if (dataLength !== 0 || chunkEnd !== png.length) {
+        fail("self-test snapshot PNG IEND boundary was invalid");
+      }
+      sawEnd = true;
+    }
+    offset = chunkEnd;
+  }
+
+  if (!sawHeader || compressedParts.length === 0 || !sawEnd || offset !== png.length) {
+    fail("self-test snapshot PNG chunk sequence was incomplete");
+  }
+  try {
+    if (inflateSync(Buffer.concat(compressedParts)).length === 0) {
+      fail("self-test snapshot PNG decompressed to empty data");
+    }
+  } catch {
+    fail("self-test snapshot PNG IDAT could not be decompressed");
   }
 }
 
@@ -152,6 +285,7 @@ function assertSelfTestSnapshot(snapshot) {
   ) {
     fail("self-test snapshot PNG dimensions were not 1x1");
   }
+  validatePngChunks(snapshot.png);
 }
 
 async function verifySelfTest(executable, ClipboardAgentFrameParser) {
@@ -194,9 +328,13 @@ async function main() {
   ).href;
   const { ClipboardAgentFrameParser } = await import(parserUrl);
 
-  if (!selfTestOnly) await verifyProduction(executable, ClipboardAgentFrameParser);
+  if (!selfTestOnly) {
+    await verifyProduction(executable, ClipboardAgentFrameParser);
+    await verifyEof(executable, ClipboardAgentFrameParser);
+    await verifyBackpressure(executable, ClipboardAgentFrameParser);
+  }
   await verifySelfTest(executable, ClipboardAgentFrameParser);
-  process.stdout.write(`clipboard-listener verify: PASS (${selfTestOnly ? "self-test" : "production+self-test"})\n`);
+  process.stdout.write(`clipboard-listener verify: PASS (${selfTestOnly ? "self-test" : "production+self-test+EOF+backpressure"})\n`);
 }
 
 main().catch((error) => {

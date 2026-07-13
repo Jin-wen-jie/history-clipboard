@@ -16,6 +16,9 @@ internal static class Program
     {
         try
         {
+            Run("capture-sequence-classification", ClassifiesCaptureSequences);
+            Run("capture-sequence-explicit-commit", CommitsOnlySuccessfulCaptures);
+            Run("capture-sequence-backlog", CoalescesBackloggedSequenceObservations);
             Run("overflow-gap-order", OverflowGapRespectsQueuedControls);
             Run("overflow-gap-intervening-controls", OverflowGapDoesNotOvertakeInterveningControls);
             Run("overflow-gap-reposition", RepositionsExistingOverflowGap);
@@ -57,6 +60,80 @@ internal static class Program
     {
         _currentTest = name;
         test();
+    }
+
+    private static void ClassifiesCaptureSequences()
+    {
+        CaptureSequenceTracker tracker = new CaptureSequenceTracker(10);
+
+        CaptureSequenceObservation duplicate = tracker.Classify(10);
+        AssertEqual(CaptureSequenceKind.Duplicate, duplicate.Kind);
+        AssertEqual((uint)10, duplicate.FromSequence);
+        AssertEqual((uint)10, duplicate.ToSequence);
+        AssertEqual(0, duplicate.Dropped);
+
+        CaptureSequenceObservation next = tracker.Classify(11);
+        AssertEqual(CaptureSequenceKind.Next, next.Kind);
+        AssertEqual(0, next.Dropped);
+
+        CaptureSequenceObservation gap = tracker.Classify(13);
+        AssertEqual(CaptureSequenceKind.Gap, gap.Kind);
+        AssertEqual((uint)10, gap.FromSequence);
+        AssertEqual((uint)13, gap.ToSequence);
+        AssertEqual(2, gap.Dropped);
+
+        CaptureSequenceObservation stale = tracker.Classify(9);
+        AssertEqual(CaptureSequenceKind.Stale, stale.Kind);
+
+        CaptureSequenceTracker wrapping = new CaptureSequenceTracker(uint.MaxValue);
+        CaptureSequenceObservation wrappedNext = wrapping.Classify(0);
+        AssertEqual(CaptureSequenceKind.Next, wrappedNext.Kind);
+        CaptureSequenceObservation halfRange = new CaptureSequenceTracker(0).Classify(0x80000000);
+        AssertEqual(CaptureSequenceKind.Stale, halfRange.Kind);
+    }
+
+    private static void CommitsOnlySuccessfulCaptures()
+    {
+        CaptureSequenceTracker tracker = new CaptureSequenceTracker(20);
+
+        AssertEqual(CaptureSequenceKind.Next, tracker.Classify(21).Kind);
+        AssertEqual((uint)20, tracker.Watermark);
+        AssertEqual(CaptureSequenceKind.Next, tracker.Classify(21).Kind);
+
+        tracker.Commit(21);
+        AssertEqual((uint)21, tracker.Watermark);
+        AssertEqual(CaptureSequenceKind.Duplicate, tracker.Classify(21).Kind);
+    }
+
+    private static void CoalescesBackloggedSequenceObservations()
+    {
+        CaptureSequenceTracker tracker = new CaptureSequenceTracker(10);
+        int snapshots = 0;
+        int gaps = 0;
+        int dropped = 0;
+        uint[] queuedMessages = new uint[] { 13, 13, 13 };
+
+        for (int index = 0; index < queuedMessages.Length; index++)
+        {
+            CaptureSequenceObservation observation = tracker.Classify(queuedMessages[index]);
+            if (observation.Kind == CaptureSequenceKind.Duplicate
+                || observation.Kind == CaptureSequenceKind.Stale)
+            {
+                continue;
+            }
+            if (observation.Kind == CaptureSequenceKind.Gap)
+            {
+                gaps++;
+                dropped += observation.Dropped;
+            }
+            snapshots++;
+            tracker.Commit(observation.ToSequence);
+        }
+
+        AssertEqual(1, snapshots);
+        AssertEqual(1, gaps);
+        AssertEqual(2, dropped);
+        AssertEqual((uint)13, tracker.Watermark);
     }
 
     private static void OverflowGapRespectsQueuedControls()
