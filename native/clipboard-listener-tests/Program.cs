@@ -28,6 +28,9 @@ internal static class Program
             Run("image-capture-budget", BoundsCandidateAndWorkingMemory);
             Run("bitmap-preflight-before-clone", RejectsBitmapBeforeCloneAllocation);
             Run("bounded-png-output-stream", BoundsEveryOutputGrowthPath);
+            Run("gdiplus-swallowed-png-limit", RejectsPngWhenGdiPlusSwallowsStreamLimit);
+            Run("capture-wide-memory-budget", RejectsCombinedCaptureBeforeAllocations);
+            Run("capture-oom-error-mapping", MapsCaptureOutOfMemoryToTooLarge);
             Run("candidate-preconversion-cleanup", CleansAllCandidatesWhenPreconversionFails);
             Run("candidate-best-effort-cleanup", ContinuesAfterCandidateDisposeFailure);
             Run("overflow-gap-order", OverflowGapRespectsQueuedControls);
@@ -336,6 +339,160 @@ internal static class Program
             });
             AssertEqual((long)4, stream.Length);
         }
+    }
+
+    private static void RejectsPngWhenGdiPlusSwallowsStreamLimit()
+    {
+        using (System.Drawing.Bitmap bitmap = CreateRandomBitmap(128, 128))
+        {
+            using (BoundedMemoryStream stream = new BoundedMemoryStream(32))
+            {
+                bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
+                AssertTrue(stream.LimitExceeded);
+            }
+
+            MethodInfo encode = typeof(ClipboardSnapshotReader).GetMethod(
+                "EncodeBitmap",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            AssertTrue(encode != null);
+
+            bool rejectedAsTooLarge = false;
+            try
+            {
+                encode.Invoke(null, new object[] { bitmap, 32 });
+            }
+            catch (TargetInvocationException exception)
+            {
+                rejectedAsTooLarge = exception.InnerException != null
+                    && exception.InnerException.GetType().Name == "CaptureTooLargeException";
+            }
+            AssertTrue(rejectedAsTooLarge);
+
+            List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+            candidates.Add(CapturedImageCandidate.FromBitmap(CreateRandomBitmap(128, 128)));
+            candidates.Add(CapturedImageCandidate.FromBytes(
+                CapturedImageCandidateKind.Dib,
+                CreateOnePixelDib(0, 0, 0)));
+            CapturedImageConversionResult fallback =
+                ClipboardSnapshotReader.ConvertFirstValidCandidate(
+                    candidates,
+                    16 * 1024 * 1024,
+                    0,
+                    32 * 1024);
+            AssertEqual(null, fallback.ErrorCode);
+            AssertEqual(CapturedImageCandidateKind.Dib, fallback.SourceKind.Value);
+            AssertPngSignature(fallback.PngBytes);
+        }
+    }
+
+    private static System.Drawing.Bitmap CreateRandomBitmap(int width, int height)
+    {
+        System.Drawing.Bitmap bitmap = new System.Drawing.Bitmap(
+            width,
+            height,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        Random random = new Random(12345);
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                bitmap.SetPixel(
+                    x,
+                    y,
+                    System.Drawing.Color.FromArgb(
+                        random.Next(256),
+                        random.Next(256),
+                        random.Next(256),
+                        random.Next(256)));
+            }
+        }
+        return bitmap;
+    }
+
+    private static void RejectsCombinedCaptureBeforeAllocations()
+    {
+        CaptureMemoryBudget rawBudget = new CaptureMemoryBudget(64);
+        AssertTrue(rawBudget.TryReserve(4));
+        RecordingBitmapFactory bitmapFactory = new RecordingBitmapFactory(
+            new CapturedBitmapMetadata(2, 2, 8));
+        CapturedImageCandidate bitmapCandidate = ClipboardSnapshotReader.CreateBitmapCandidate(
+            new IntPtr(1),
+            rawBudget,
+            35,
+            bitmapFactory);
+        AssertEqual("too-large", bitmapCandidate.ErrorCode);
+        AssertEqual(0, bitmapFactory.CloneCalls);
+        bitmapCandidate.Dispose();
+
+        byte[] dib = CreateOnePixelDib(0, 0, 0);
+        long imageOnly = ClipboardSnapshotReader.EstimateWorkingBytes(
+            CapturedImageCandidateKind.Dib,
+            dib.Length,
+            dib.Length,
+            1,
+            1);
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(CapturedImageCandidate.FromBytes(CapturedImageCandidateKind.Dib, dib));
+        CapturedImageConversionResult imageResult =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, imageOnly + 7, 8);
+        AssertEqual("too-large", imageResult.ErrorCode);
+
+        bool decoderCalled = false;
+        string decodedText;
+        string decodeError;
+        byte[] unicode = Encoding.Unicode.GetBytes("abcd\0");
+        bool decoded = ClipboardSnapshotReader.TryDecodeUnicodeWithinBudget(
+            unicode,
+            4,
+            21,
+            delegate(byte[] bytes, int index, int count)
+            {
+                decoderCalled = true;
+                return Encoding.Unicode.GetString(bytes, index, count);
+            },
+            out decodedText,
+            out decodeError);
+        AssertTrue(!decoded);
+        AssertEqual("too-large", decodeError);
+        AssertTrue(!decoderCalled);
+
+        ClipboardSnapshotResult result = ClipboardSnapshotResult.Success(
+            1,
+            1,
+            false,
+            true,
+            "abcd",
+            new byte[4],
+            1,
+            1,
+            TestTimestamp,
+            null);
+        bool payloadAllocatorCalled = false;
+        AgentFrame frame;
+        string frameError;
+        bool built = SnapshotFrameBuilder.TryBuild(
+            result,
+            19,
+            delegate(int length)
+            {
+                payloadAllocatorCalled = true;
+                return new byte[length];
+            },
+            out frame,
+            out frameError);
+        AssertTrue(!built);
+        AssertEqual("too-large", frameError);
+        AssertTrue(!payloadAllocatorCalled);
+    }
+
+    private static void MapsCaptureOutOfMemoryToTooLarge()
+    {
+        AssertEqual(
+            "too-large",
+            ClipboardSnapshotReader.GetCaptureErrorCode(new OutOfMemoryException()));
+        AssertEqual(
+            "internal",
+            ClipboardSnapshotReader.GetCaptureErrorCode(new InvalidOperationException()));
     }
 
     private static void CleansAllCandidatesWhenPreconversionFails()

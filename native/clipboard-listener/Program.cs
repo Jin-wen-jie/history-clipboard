@@ -239,9 +239,12 @@ namespace HistoryClipboard.ClipboardListener
                 }
                 PublishCapture(result, captured);
             }
-            catch
+            catch (Exception exception)
             {
-                TryEnqueueFixedError("internal", ReadCurrentSequence(), false);
+                TryEnqueueFixedError(
+                    ClipboardSnapshotReader.GetCaptureErrorCode(exception),
+                    ReadCurrentSequence(),
+                    false);
             }
         }
 
@@ -306,80 +309,7 @@ namespace HistoryClipboard.ClipboardListener
             out AgentFrame frame,
             out string errorCode)
         {
-            frame = null;
-            errorCode = null;
-            try
-            {
-                int textLength = result.HasText
-                    ? StrictUtf8.GetByteCount(result.Text)
-                    : 0;
-                int pngLength = result.PngBytes == null ? 0 : result.PngBytes.Length;
-                int payloadLength = checked(textLength + pngLength);
-                if (payloadLength > AgentProtocol.MaxSnapshotPayloadLength)
-                {
-                    errorCode = "too-large";
-                    return false;
-                }
-
-                byte[] payload = new byte[payloadLength];
-                if (textLength > 0)
-                {
-                    int encoded = StrictUtf8.GetBytes(
-                        result.Text,
-                        0,
-                        result.Text.Length,
-                        payload,
-                        0);
-                    if (encoded != textLength)
-                    {
-                        errorCode = "internal";
-                        return false;
-                    }
-                }
-                if (pngLength > 0)
-                {
-                    Buffer.BlockCopy(result.PngBytes, 0, payload, textLength, pngLength);
-                }
-
-                AgentTextSegment textSegment = result.HasText
-                    ? new AgentTextSegment(0, textLength)
-                    : null;
-                AgentPngSegment pngSegment = result.PngBytes == null
-                    ? null
-                    : new AgentPngSegment(
-                        textLength,
-                        pngLength,
-                        result.PngWidth,
-                        result.PngHeight);
-                frame = AgentFrame.SnapshotOwned(
-                    result.Sequence,
-                    result.CapturedAt,
-                    payload,
-                    textSegment,
-                    pngSegment);
-                AgentProtocol.GetFrameLength(frame);
-                return true;
-            }
-            catch (OverflowException)
-            {
-                errorCode = "too-large";
-                return false;
-            }
-            catch (OutOfMemoryException)
-            {
-                errorCode = "too-large";
-                return false;
-            }
-            catch (InvalidOperationException)
-            {
-                errorCode = "too-large";
-                return false;
-            }
-            catch
-            {
-                errorCode = "internal";
-                return false;
-            }
+            return SnapshotFrameBuilder.TryBuild(result, out frame, out errorCode);
         }
 
         private static int CalculateDropped(uint fromSequence, uint toSequence)

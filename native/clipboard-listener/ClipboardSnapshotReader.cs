@@ -524,6 +524,178 @@ namespace HistoryClipboard.ClipboardListener
         }
     }
 
+    internal static class SnapshotMemoryBudget
+    {
+        private const long EstimatedStringObjectBytes = 32L;
+
+        internal static long EstimateStringBytes(int characterCount)
+        {
+            if (characterCount < 0)
+            {
+                throw new ArgumentOutOfRangeException("characterCount");
+            }
+            return checked(
+                EstimatedStringObjectBytes
+                + checked(((long)characterCount + 1L) * 2L));
+        }
+
+        internal static bool Fits(
+            long maxWorkingBytes,
+            long firstBytes,
+            long secondBytes,
+            long pendingBytes)
+        {
+            if (maxWorkingBytes < 0
+                || firstBytes < 0
+                || secondBytes < 0
+                || pendingBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException();
+            }
+            try
+            {
+                return checked(firstBytes + secondBytes + pendingBytes)
+                    <= maxWorkingBytes;
+            }
+            catch (OverflowException)
+            {
+                return false;
+            }
+        }
+    }
+
+    internal static class SnapshotFrameBuilder
+    {
+        private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
+        internal static bool TryBuild(
+            ClipboardSnapshotResult result,
+            out AgentFrame frame,
+            out string errorCode)
+        {
+            return TryBuild(
+                result,
+                ClipboardSnapshotReader.MaxCaptureWorkingBytes,
+                delegate(int length) { return new byte[length]; },
+                out frame,
+                out errorCode);
+        }
+
+        internal static bool TryBuild(
+            ClipboardSnapshotResult result,
+            long maxWorkingBytes,
+            Func<int, byte[]> payloadAllocator,
+            out AgentFrame frame,
+            out string errorCode)
+        {
+            if (result == null)
+            {
+                throw new ArgumentNullException("result");
+            }
+            if (maxWorkingBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("maxWorkingBytes");
+            }
+            if (payloadAllocator == null)
+            {
+                throw new ArgumentNullException("payloadAllocator");
+            }
+
+            frame = null;
+            errorCode = null;
+            try
+            {
+                int textLength = result.HasText
+                    ? StrictUtf8.GetByteCount(result.Text)
+                    : 0;
+                int pngLength = result.PngBytes == null ? 0 : result.PngBytes.Length;
+                int payloadLength = checked(textLength + pngLength);
+                if (payloadLength > AgentProtocol.MaxSnapshotPayloadLength)
+                {
+                    errorCode = "too-large";
+                    return false;
+                }
+
+                long textBytes = result.HasText
+                    ? SnapshotMemoryBudget.EstimateStringBytes(result.Text.Length)
+                    : 0;
+                if (!SnapshotMemoryBudget.Fits(
+                    maxWorkingBytes,
+                    textBytes,
+                    pngLength,
+                    payloadLength))
+                {
+                    errorCode = "too-large";
+                    return false;
+                }
+
+                byte[] payload = payloadAllocator(payloadLength);
+                if (payload == null || payload.Length != payloadLength)
+                {
+                    errorCode = "internal";
+                    return false;
+                }
+                if (textLength > 0)
+                {
+                    int encoded = StrictUtf8.GetBytes(
+                        result.Text,
+                        0,
+                        result.Text.Length,
+                        payload,
+                        0);
+                    if (encoded != textLength)
+                    {
+                        errorCode = "internal";
+                        return false;
+                    }
+                }
+                if (pngLength > 0)
+                {
+                    Buffer.BlockCopy(result.PngBytes, 0, payload, textLength, pngLength);
+                }
+
+                AgentTextSegment textSegment = result.HasText
+                    ? new AgentTextSegment(0, textLength)
+                    : null;
+                AgentPngSegment pngSegment = result.PngBytes == null
+                    ? null
+                    : new AgentPngSegment(
+                        textLength,
+                        pngLength,
+                        result.PngWidth,
+                        result.PngHeight);
+                frame = AgentFrame.SnapshotOwned(
+                    result.Sequence,
+                    result.CapturedAt,
+                    payload,
+                    textSegment,
+                    pngSegment);
+                AgentProtocol.GetFrameLength(frame);
+                return true;
+            }
+            catch (OverflowException)
+            {
+                errorCode = "too-large";
+                return false;
+            }
+            catch (OutOfMemoryException)
+            {
+                errorCode = "too-large";
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                errorCode = "too-large";
+                return false;
+            }
+            catch
+            {
+                errorCode = "internal";
+                return false;
+            }
+        }
+    }
+
     internal sealed class ClipboardSnapshotReader
     {
         private const int OpenTimeoutMilliseconds = 1000;
@@ -553,6 +725,9 @@ namespace HistoryClipboard.ClipboardListener
             uint before = NativeMethods.GetClipboardSequenceNumber();
             uint observed = before;
             bool sequenceAdvanced = false;
+            List<CapturedImageCandidate> imageCandidates = new List<CapturedImageCandidate>();
+            CaptureMemoryBudget rawBudget =
+                new CaptureMemoryBudget(MaxCapturedImageCandidateBytes);
             if (!OpenWithRetry(before, out observed, out sequenceAdvanced))
             {
                 return ClipboardSnapshotResult.Busy(before, observed, sequenceAdvanced);
@@ -560,63 +735,113 @@ namespace HistoryClipboard.ClipboardListener
 
             bool hasText = false;
             byte[] unicodeBytes = null;
-            List<CapturedImageCandidate> imageCandidates = new List<CapturedImageCandidate>();
             uint after = observed;
             long capturedAt = 0;
             string errorCode = null;
 
-            return ExecuteWithCandidateCleanup(
-                imageCandidates,
-                delegate
-                {
-                    try
+            try
+            {
+                return ExecuteWithCandidateCleanup(
+                    imageCandidates,
+                    delegate
                     {
-                        ReadUnicodeText(out hasText, out unicodeBytes, ref errorCode);
-                        ReadImageCandidates(imageCandidates);
-                        after = NativeMethods.GetClipboardSequenceNumber();
-                        capturedAt = AgentFrame.CurrentUnixMilliseconds();
-                        if (after != before)
+                        try
                         {
-                            sequenceAdvanced = true;
+                            ReadUnicodeText(
+                                rawBudget,
+                                out hasText,
+                                out unicodeBytes,
+                                ref errorCode);
+                            ReadImageCandidates(rawBudget, imageCandidates);
+                            after = NativeMethods.GetClipboardSequenceNumber();
+                            capturedAt = AgentFrame.CurrentUnixMilliseconds();
+                            if (after != before)
+                            {
+                                sequenceAdvanced = true;
+                            }
                         }
-                    }
-                    catch
-                    {
-                        MergeError(ref errorCode, "internal");
-                        after = NativeMethods.GetClipboardSequenceNumber();
-                        capturedAt = AgentFrame.CurrentUnixMilliseconds();
-                    }
-                    finally
-                    {
-                        NativeMethods.CloseClipboard();
-                    }
+                        catch (Exception exception)
+                        {
+                            MergeError(ref errorCode, GetCaptureErrorCode(exception));
+                            after = NativeMethods.GetClipboardSequenceNumber();
+                            capturedAt = AgentFrame.CurrentUnixMilliseconds();
+                        }
+                        finally
+                        {
+                            NativeMethods.CloseClipboard();
+                        }
 
-                    string text = null;
-                    if (hasText && !TryDecodeUnicode(unicodeBytes, out text))
-                    {
-                        hasText = false;
-                        MergeError(ref errorCode, "internal");
-                    }
+                        CapturedImageConversionResult image =
+                            ConvertFirstValidCandidate(
+                                imageCandidates,
+                                MaxCaptureWorkingBytes,
+                                unicodeBytes == null ? 0 : unicodeBytes.Length);
+                        if (image.ErrorCode != null)
+                        {
+                            MergeError(ref errorCode, image.ErrorCode);
+                        }
 
-                    CapturedImageConversionResult image =
-                        ConvertFirstValidCandidate(imageCandidates, MaxCaptureWorkingBytes);
-                    if (image.ErrorCode != null)
-                    {
-                        MergeError(ref errorCode, image.ErrorCode);
-                    }
+                        string text = null;
+                        if (hasText)
+                        {
+                            string decodeError;
+                            bool decoded = TryDecodeUnicodeWithinBudget(
+                                unicodeBytes,
+                                image.PngBytes == null ? 0 : image.PngBytes.Length,
+                                MaxCaptureWorkingBytes,
+                                delegate(byte[] bytes, int index, int count)
+                                {
+                                    return StrictUnicode.GetString(bytes, index, count);
+                                },
+                                out text,
+                                out decodeError);
+                            unicodeBytes = null;
+                            if (!decoded)
+                            {
+                                hasText = false;
+                                MergeError(ref errorCode, decodeError);
+                            }
+                        }
 
-                    return ClipboardSnapshotResult.Success(
-                        before,
-                        after,
-                        sequenceAdvanced,
-                        hasText,
-                        text,
-                        image.PngBytes,
-                        image.Width,
-                        image.Height,
-                        capturedAt,
-                        errorCode);
-                });
+                        return ClipboardSnapshotResult.Success(
+                            before,
+                            after,
+                            sequenceAdvanced,
+                            hasText,
+                            text,
+                            image.PngBytes,
+                            image.Width,
+                            image.Height,
+                            capturedAt,
+                            errorCode);
+                    });
+            }
+            catch (OutOfMemoryException exception)
+            {
+                NativeMethods.CloseClipboard();
+                return ClipboardSnapshotResult.Success(
+                    before,
+                    after,
+                    sequenceAdvanced,
+                    false,
+                    null,
+                    null,
+                    0,
+                    0,
+                    capturedAt == 0
+                        ? AgentFrame.CurrentUnixMilliseconds()
+                        : capturedAt,
+                    GetCaptureErrorCode(exception));
+            }
+        }
+
+        internal static string GetCaptureErrorCode(Exception exception)
+        {
+            if (exception == null)
+            {
+                throw new ArgumentNullException("exception");
+            }
+            return exception is OutOfMemoryException ? "too-large" : "internal";
         }
 
         internal static T ExecuteWithCandidateCleanup<T>(
@@ -679,10 +904,15 @@ namespace HistoryClipboard.ClipboardListener
         }
 
         private static void ReadUnicodeText(
+            CaptureMemoryBudget budget,
             out bool hasText,
             out byte[] unicodeBytes,
             ref string errorCode)
         {
+            if (budget == null)
+            {
+                throw new ArgumentNullException("budget");
+            }
             hasText = false;
             unicodeBytes = null;
             if (!NativeMethods.IsClipboardFormatAvailable(NativeMethods.CF_UNICODETEXT))
@@ -691,19 +921,32 @@ namespace HistoryClipboard.ClipboardListener
             }
 
             IntPtr handle = NativeMethods.GetClipboardData(NativeMethods.CF_UNICODETEXT);
-            CopyStatus status = CopyGlobalMemory(handle, MaxClipboardBytes, out unicodeBytes);
+            CopyStatus status = CopyGlobalMemory(
+                handle,
+                budget.RemainingBytes,
+                out unicodeBytes);
             if (status == CopyStatus.Success)
             {
-                hasText = true;
-                return;
+                if (budget.TryReserve(unicodeBytes.Length))
+                {
+                    hasText = true;
+                    return;
+                }
+                unicodeBytes = null;
+                status = CopyStatus.TooLarge;
             }
 
             MergeError(ref errorCode, status == CopyStatus.TooLarge ? "too-large" : "internal");
         }
 
-        private void ReadImageCandidates(List<CapturedImageCandidate> candidates)
+        private void ReadImageCandidates(
+            CaptureMemoryBudget budget,
+            List<CapturedImageCandidate> candidates)
         {
-            CaptureMemoryBudget budget = new CaptureMemoryBudget(MaxCapturedImageCandidateBytes);
+            if (budget == null)
+            {
+                throw new ArgumentNullException("budget");
+            }
             if (_pngFormat != 0)
             {
                 TryReadGlobalImageCandidate(
@@ -941,11 +1184,32 @@ namespace HistoryClipboard.ClipboardListener
             }
         }
 
-        private static bool TryDecodeUnicode(byte[] bytes, out string text)
+        internal static bool TryDecodeUnicodeWithinBudget(
+            byte[] bytes,
+            long additionalRetainedBytes,
+            long maxWorkingBytes,
+            Func<byte[], int, int, string> decoder,
+            out string text,
+            out string errorCode)
         {
+            if (additionalRetainedBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("additionalRetainedBytes");
+            }
+            if (maxWorkingBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("maxWorkingBytes");
+            }
+            if (decoder == null)
+            {
+                throw new ArgumentNullException("decoder");
+            }
+
             text = null;
+            errorCode = null;
             if (bytes == null || (bytes.Length & 1) != 0)
             {
+                errorCode = "internal";
                 return false;
             }
 
@@ -961,11 +1225,28 @@ namespace HistoryClipboard.ClipboardListener
 
             try
             {
-                text = StrictUnicode.GetString(bytes, 0, length);
+                long stringBytes = SnapshotMemoryBudget.EstimateStringBytes(length / 2);
+                if (!SnapshotMemoryBudget.Fits(
+                    maxWorkingBytes,
+                    bytes.Length,
+                    additionalRetainedBytes,
+                    stringBytes))
+                {
+                    errorCode = "too-large";
+                    return false;
+                }
+
+                text = decoder(bytes, 0, length);
                 return true;
+            }
+            catch (OutOfMemoryException)
+            {
+                errorCode = "too-large";
+                return false;
             }
             catch (DecoderFallbackException)
             {
+                errorCode = "internal";
                 return false;
             }
         }
@@ -973,6 +1254,27 @@ namespace HistoryClipboard.ClipboardListener
         internal static CapturedImageConversionResult ConvertFirstValidCandidate(
             IList<CapturedImageCandidate> candidates,
             long maxWorkingBytes)
+        {
+            return ConvertFirstValidCandidate(candidates, maxWorkingBytes, 0);
+        }
+
+        internal static CapturedImageConversionResult ConvertFirstValidCandidate(
+            IList<CapturedImageCandidate> candidates,
+            long maxWorkingBytes,
+            long externalRetainedBytes)
+        {
+            return ConvertFirstValidCandidate(
+                candidates,
+                maxWorkingBytes,
+                externalRetainedBytes,
+                AgentProtocol.MaxSnapshotPayloadLength);
+        }
+
+        internal static CapturedImageConversionResult ConvertFirstValidCandidate(
+            IList<CapturedImageCandidate> candidates,
+            long maxWorkingBytes,
+            long externalRetainedBytes,
+            int maxPngOutputBytes)
         {
             if (candidates == null)
             {
@@ -982,10 +1284,18 @@ namespace HistoryClipboard.ClipboardListener
             {
                 throw new ArgumentOutOfRangeException("maxWorkingBytes");
             }
+            if (externalRetainedBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("externalRetainedBytes");
+            }
+            if (maxPngOutputBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("maxPngOutputBytes");
+            }
 
             string errorCode = null;
             bool sawCandidate = false;
-            long retainedBytes = 0;
+            long retainedBytes = externalRetainedBytes;
             try
             {
                 for (int index = 0; index < candidates.Count; index++)
@@ -1025,6 +1335,9 @@ namespace HistoryClipboard.ClipboardListener
                         int width;
                         int height;
                         GetCandidateDimensions(candidate, out width, out height);
+                        int pngOutputLimit = Math.Min(
+                            GetPngOutputLimit(width, height),
+                            maxPngOutputBytes);
                         long estimatedBytes = EstimateWorkingBytes(
                             candidate.Kind,
                             candidate.StoredBytes,
@@ -1039,6 +1352,10 @@ namespace HistoryClipboard.ClipboardListener
                         PngData png;
                         if (candidate.Kind == CapturedImageCandidateKind.Png)
                         {
+                            if (candidate.Bytes.Length > pngOutputLimit)
+                            {
+                                throw new CaptureTooLargeException();
+                            }
                             png = ValidatePng(candidate.Bytes);
                         }
                         else if (candidate.Kind == CapturedImageCandidateKind.DibV5
@@ -1046,13 +1363,13 @@ namespace HistoryClipboard.ClipboardListener
                         {
                             png = ConvertDib(
                                 candidate.Bytes,
-                                GetPngOutputLimit(width, height));
+                                pngOutputLimit);
                         }
                         else
                         {
                             png = EncodeBitmap(
                                 candidate.Bitmap,
-                                GetPngOutputLimit(width, height));
+                                pngOutputLimit);
                         }
                         return CapturedImageConversionResult.Success(
                             candidate.Kind,
@@ -1388,7 +1705,24 @@ namespace HistoryClipboard.ClipboardListener
                     }
                     throw;
                 }
-                return new PngData(stream.ToArray(), bitmap.Width, bitmap.Height);
+                if (stream.LimitExceeded)
+                {
+                    throw new CaptureTooLargeException();
+                }
+
+                byte[] png = stream.ToArray();
+                if (png.Length < PngSignature.Length)
+                {
+                    throw new InvalidDataException();
+                }
+                for (int index = 0; index < PngSignature.Length; index++)
+                {
+                    if (png[index] != PngSignature[index])
+                    {
+                        throw new InvalidDataException();
+                    }
+                }
+                return new PngData(png, bitmap.Width, bitmap.Height);
             }
         }
 
