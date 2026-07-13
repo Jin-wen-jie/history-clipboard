@@ -57,6 +57,11 @@ export class HistoryStore {
     this.revision = loaded.revision;
     this.metadataRecoverable = loaded.validCandidate || (!loaded.hadCandidates && !contentExistedBeforeInit);
     this.cacheDirty = true;
+    if (this.metadataRecoverable) {
+      await this.vault.cleanupOrphans(this.referencedContentKeys());
+    } else {
+      console.error("Encrypted content cleanup skipped: metadata-unrecoverable");
+    }
   }
 
   async flush(): Promise<void> {
@@ -65,7 +70,7 @@ export class HistoryStore {
 
   async list(query: HistoryQuery = {}): Promise<HistoryItem[]> {
     // Always check retention even if cached — it may remove items
-    const retentionChanged = await this.enforceRetention();
+    await this.enforceRetention();
 
     const type = query.type ?? "all";
     const search = query.search?.trim().toLocaleLowerCase();
@@ -104,15 +109,9 @@ export class HistoryStore {
 
     // Clean up any items that failed to decrypt
     if (unreadableIds.length > 0) {
-      this.items = this.items.filter((item) => !unreadableIds.includes(item.id));
-      for (const id of unreadableIds) {
-        this.itemCache.delete(id);
-      }
-      await this.saveMetadata();
-    }
-
-    if (retentionChanged) {
-      await this.saveMetadata();
+      const unreadableIdSet = new Set(unreadableIds);
+      const unreadableItems = this.items.filter((item) => unreadableIdSet.has(item.id));
+      await this.commitRemoval(unreadableItems);
     }
 
     return visibleItems;
@@ -181,11 +180,7 @@ export class HistoryStore {
       return false;
     }
 
-    this.items = this.items.filter((candidate) => candidate.id !== id);
-    this.itemCache.delete(id);
-    this.invalidatedIds.delete(id);
-    await this.deleteContent(item);
-    await this.saveMetadata();
+    await this.commitRemoval([item]);
     return true;
   }
 
@@ -196,30 +191,13 @@ export class HistoryStore {
     const toRemove = this.items.filter((item) => idSet.has(item.id));
     if (toRemove.length === 0) return 0;
 
-    this.items = this.items.filter((item) => !idSet.has(item.id));
-    // Remove from cache
-    for (const id of ids) {
-      this.itemCache.delete(id);
-      this.invalidatedIds.delete(id);
-    }
-
-    // Delete content files in parallel
-    await Promise.all(toRemove.map((item) => this.deleteContent(item)));
-    await this.saveMetadata();
+    await this.commitRemoval(toRemove);
     return toRemove.length;
   }
 
   async clear(type: HistoryFilterType = "all"): Promise<void> {
     const removed = this.items.filter((item) => type === "all" || item.type === type);
-    const removedIds = new Set(removed.map((item) => item.id));
-    this.items = this.items.filter((item) => type !== "all" && item.type !== type);
-    // Clear cache for removed items
-    for (const id of removedIds) {
-      this.itemCache.delete(id);
-      this.invalidatedIds.delete(id);
-    }
-    await Promise.all(removed.map((item) => this.deleteContent(item)));
-    await this.saveMetadata();
+    await this.commitRemoval(removed);
   }
 
   async getContent(id: string): Promise<ClipboardContent | undefined> {
@@ -242,8 +220,10 @@ export class HistoryStore {
   async updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
     this.settings = { ...this.settings, ...patch };
     await this.saveSettings();
-    await this.enforceRetention();
-    await this.saveMetadata();
+    const retentionChanged = await this.enforceRetention();
+    if (!retentionChanged) {
+      await this.saveMetadata();
+    }
     return this.getSettings();
   }
 
@@ -348,8 +328,10 @@ export class HistoryStore {
     // Decrypt once; cache it and return the same object
     const pub = await this.toPublicItem(item);
     this.itemCache.set(id, pub);
-    await this.enforceRetention();
-    await this.saveMetadata();
+    const retentionChanged = await this.enforceRetention();
+    if (!retentionChanged) {
+      await this.saveMetadata();
+    }
     return { ok: true, item: pub };
   }
 
@@ -447,53 +429,57 @@ export class HistoryStore {
   // ── Private: Retention ──
 
   private async enforceRetention(): Promise<boolean> {
-    const expiredRemoved = await this.removeExpiredItems();
-    const trimmedRemoved = await this.trimToMaxItems();
-    return expiredRemoved || trimmedRemoved;
-  }
-
-  private async removeExpiredItems(): Promise<boolean> {
     const cutoff = this.currentRetentionCutoff();
-    const removed = this.items.filter((item) => Date.parse(item.updatedAt) < cutoff);
+    const expired = this.items.filter((item) => Date.parse(item.updatedAt) < cutoff);
+    const expiredIds = new Set(expired.map((item) => item.id));
+    const retained = this.items.filter((item) => !expiredIds.has(item.id));
+    const newest = [...retained].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const removed = [...expired, ...newest.slice(this.settings.maxItems)];
     if (removed.length === 0) {
       return false;
     }
 
-    const removedIds = new Set(removed.map((item) => item.id));
-    await this.removeItemsById(removedIds, removed);
+    await this.commitRemoval(removed);
     return true;
   }
 
-  private async trimToMaxItems(): Promise<boolean> {
-    const newest = [...this.items].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const removed = newest.slice(this.settings.maxItems);
+  private async commitRemoval(removed: StoredItem[]): Promise<void> {
     if (removed.length === 0) {
-      return false;
+      return;
     }
 
     const removedIds = new Set(removed.map((item) => item.id));
-    await this.removeItemsById(removedIds, removed);
-    return true;
-  }
-
-  private async removeItems(items: StoredItem[]): Promise<void> {
-    await this.removeItemsById(new Set(items.map((item) => item.id)), items);
-  }
-
-  private async removeItemsById(removedIds: Set<string>, removed: StoredItem[]): Promise<void> {
     this.items = this.items.filter((item) => !removedIds.has(item.id));
     for (const id of removedIds) {
       this.itemCache.delete(id);
       this.invalidatedIds.delete(id);
     }
-    await Promise.all(removed.map((item) => this.deleteContent(item)));
+    await this.saveMetadata();
+
+    const cleanupResults = await Promise.allSettled(
+      removed.flatMap((item) => this.deleteContent(item))
+    );
+    if (cleanupResults.some((result) => result.status === "rejected")) {
+      console.error("Encrypted content cleanup failed");
+    }
   }
 
-  private async deleteContent(item: StoredItem): Promise<void> {
-    await this.vault.delete(item.contentKey);
-    if (item.type === "image") {
-      await this.vault.delete(item.thumbnailKey);
+  private deleteContent(item: StoredItem): Promise<void>[] {
+    const contentKeys = item.type === "image"
+      ? [item.contentKey, item.thumbnailKey]
+      : [item.contentKey];
+    return contentKeys.map((contentKey) => this.vault.delete(contentKey));
+  }
+
+  private referencedContentKeys(): Set<string> {
+    const contentKeys = new Set<string>();
+    for (const item of this.items) {
+      contentKeys.add(item.contentKey);
+      if (item.type === "image") {
+        contentKeys.add(item.thumbnailKey);
+      }
     }
+    return contentKeys;
   }
 
   // ── Private: Persistence ──

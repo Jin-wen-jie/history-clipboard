@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -23,6 +23,11 @@ describe("HistoryStore", () => {
   let keyProvider: MemoryKeyProvider;
   let currentTime: Date;
 
+  type MetadataSnapshot = {
+    revision: number;
+    items: Array<{ id: string }>;
+  };
+
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "history-clipboard-"));
     currentTime = new Date("2026-06-23T12:00:00.000Z");
@@ -30,6 +35,49 @@ describe("HistoryStore", () => {
     store = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
     await store.init();
   });
+
+  async function expectMetadataCommittedBeforeCleanup<T>(
+    target: HistoryStore,
+    operation: () => Promise<T>,
+    assertMetadata: (metadata: MetadataSnapshot) => void
+  ): Promise<T> {
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const vault = (target as unknown as {
+      vault: { delete(id: string): Promise<void> };
+    }).vault;
+    const originalDelete = vault.delete.bind(vault);
+    const deleteSpy = vi.spyOn(vault, "delete").mockImplementation(async (id) => {
+      await deleteGate;
+      await originalDelete(id);
+    });
+
+    const pendingOperation = operation();
+    let orderingError: unknown;
+    try {
+      await vi.waitFor(async () => {
+        const metadata = JSON.parse(
+          await readFile(join(dir, "history.json"), "utf8")
+        ) as MetadataSnapshot;
+        assertMetadata(metadata);
+      });
+    } catch (error) {
+      orderingError = error;
+    } finally {
+      releaseDelete();
+    }
+
+    try {
+      const result = await pendingOperation;
+      if (orderingError) throw orderingError;
+      expect(deleteSpy).toHaveBeenCalled();
+      return result;
+    } finally {
+      deleteSpy.mockRestore();
+    }
+  }
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -59,6 +107,310 @@ describe("HistoryStore", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("commits removed metadata before deleting encrypted content", async () => {
+    const added = await store.addText("alpha");
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected text item");
+
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const vault = (store as unknown as {
+      vault: { delete(id: string): Promise<void> };
+    }).vault;
+    const originalDelete = vault.delete.bind(vault);
+    vi.spyOn(vault, "delete").mockImplementation(async (id) => {
+      await deleteGate;
+      await originalDelete(id);
+    });
+
+    const deletion = store.delete(added.item.id);
+    let orderingError: unknown;
+    try {
+      await vi.waitFor(async () => {
+        const metadata = JSON.parse(await readFile(join(dir, "history.json"), "utf8"));
+        expect(metadata.items).toEqual([]);
+      });
+    } catch (error) {
+      orderingError = error;
+    } finally {
+      releaseDelete();
+    }
+
+    const deleted = await deletion;
+    if (orderingError) throw orderingError;
+    expect(deleted).toBe(true);
+  });
+
+  test("deleteMany commits metadata before deleting encrypted content", async () => {
+    const alpha = await store.addText("alpha");
+    const beta = await store.addText("beta");
+    expect(alpha.ok && beta.ok).toBe(true);
+    if (!alpha.ok || !beta.ok) throw new Error("expected text items");
+
+    const removed = await expectMetadataCommittedBeforeCleanup(
+      store,
+      () => store.deleteMany([alpha.item.id]),
+      (metadata) => {
+        expect(metadata.revision).toBe(3);
+        expect(metadata.items.map((item) => item.id)).toEqual([beta.item.id]);
+      }
+    );
+
+    expect(removed).toBe(1);
+  });
+
+  test("clear commits metadata before deleting encrypted content", async () => {
+    await store.addText("alpha");
+
+    await expectMetadataCommittedBeforeCleanup(
+      store,
+      () => store.clear(),
+      (metadata) => {
+        expect(metadata.revision).toBe(2);
+        expect(metadata.items).toEqual([]);
+      }
+    );
+  });
+
+  test("expired-item retention commits metadata before deleting encrypted content", async () => {
+    currentTime = new Date("2026-05-01T08:00:00.000Z");
+    await store.addText("old");
+    currentTime = new Date("2026-06-23T12:00:00.000Z");
+
+    await expectMetadataCommittedBeforeCleanup(
+      store,
+      () => store.list(),
+      (metadata) => {
+        expect(metadata.revision).toBe(2);
+        expect(metadata.items).toEqual([]);
+      }
+    );
+  });
+
+  test("max-item retention commits metadata once before deleting encrypted content", async () => {
+    const first = await store.addText("one");
+    currentTime = new Date("2026-06-23T12:01:00.000Z");
+    await store.addText("two");
+    currentTime = new Date("2026-06-23T12:02:00.000Z");
+    await store.addText("three");
+    currentTime = new Date("2026-06-23T12:03:00.000Z");
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("expected text item");
+
+    await expectMetadataCommittedBeforeCleanup(
+      store,
+      () => store.addText("four"),
+      (metadata) => {
+        expect(metadata.revision).toBe(4);
+        expect(metadata.items).toHaveLength(3);
+        expect(metadata.items.map((item) => item.id)).not.toContain(first.item.id);
+      }
+    );
+  });
+
+  test("unreadable cleanup commits metadata before deleting encrypted content", async () => {
+    await writeFile(join(dir, "history.json"), JSON.stringify({
+      version: 1,
+      revision: 1,
+      items: [
+        {
+          id: "missing-content",
+          type: "text",
+          hash: "hash",
+          contentKey: "missing.text",
+          createdAt: "2026-06-23T12:00:00.000Z",
+          updatedAt: "2026-06-23T12:00:00.000Z",
+          pinned: false,
+          copyCount: 1
+        }
+      ]
+    }), "utf8");
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+
+    await expectMetadataCommittedBeforeCleanup(
+      reloaded,
+      () => reloaded.list(),
+      (metadata) => {
+        expect(metadata.revision).toBe(2);
+        expect(metadata.items).toEqual([]);
+      }
+    );
+  });
+
+  test("logs only a fixed message when encrypted content cleanup fails", async () => {
+    const added = await store.addImage({
+      png: Buffer.from([1, 2, 3]),
+      thumbnailPng: Buffer.from([4]),
+      width: 1,
+      height: 1
+    });
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected image item");
+
+    const vault = (store as unknown as {
+      vault: { delete(id: string): Promise<void> };
+    }).vault;
+    const deleteSpy = vi.spyOn(vault, "delete").mockRejectedValue(
+      new Error(`sensitive cleanup failure: ${dir}`)
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(store.delete(added.item.id)).resolves.toBe(true);
+      const metadata = JSON.parse(
+        await readFile(join(dir, "history.json"), "utf8")
+      ) as MetadataSnapshot;
+      expect(metadata.items).toEqual([]);
+      expect(deleteSpy).toHaveBeenCalledTimes(2);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith("Encrypted content cleanup failed");
+    } finally {
+      errorSpy.mockRestore();
+      deleteSpy.mockRestore();
+    }
+  });
+
+  test("waits for every image blob cleanup after one cleanup fails", async () => {
+    const added = await store.addImage({
+      png: Buffer.from([1, 2, 3]),
+      thumbnailPng: Buffer.from([4]),
+      width: 1,
+      height: 1
+    });
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected image item");
+
+    let releaseThumbnail!: () => void;
+    const thumbnailGate = new Promise<void>((resolve) => {
+      releaseThumbnail = resolve;
+    });
+    const vault = (store as unknown as {
+      vault: { delete(id: string): Promise<void> };
+    }).vault;
+    const deleteSpy = vi.spyOn(vault, "delete").mockImplementation(async (id) => {
+      if (id.endsWith(".image")) {
+        throw new Error("content cleanup failed");
+      }
+      await thumbnailGate;
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let settled = false;
+    const deletion = store.delete(added.item.id).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    try {
+      await vi.waitFor(() => expect(deleteSpy).toHaveBeenCalledTimes(2));
+      await Promise.resolve();
+      expect(settled).toBe(false);
+    } finally {
+      releaseThumbnail();
+      await deletion;
+      errorSpy.mockRestore();
+      deleteSpy.mockRestore();
+    }
+
+    await expect(deletion).resolves.toBe(true);
+  });
+
+  test("flush waits for the latest revision", async () => {
+    const added = await store.addText("alpha");
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected text item");
+
+    void store.setPinned(added.item.id, true);
+    void store.setPinned(added.item.id, false);
+    await store.flush();
+
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+    expect(await reloaded.list()).toMatchObject([{ id: added.item.id, pinned: false }]);
+  });
+
+  test("cleans orphan blobs only when metadata is recoverable", async () => {
+    await store.addText("alpha");
+    const image = await store.addImage({
+      png: Buffer.from([9]),
+      thumbnailPng: Buffer.from([8]),
+      width: 1,
+      height: 1
+    });
+    expect(image.ok).toBe(true);
+    if (!image.ok) throw new Error("expected image item");
+    const orphanPath = join(dir, "content", "orphan.text.bin");
+    await writeFile(orphanPath, Buffer.from([1, 2, 3]));
+
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+
+    await expect(readFile(orphanPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(reloaded.list()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "text", text: "alpha" }),
+      expect.objectContaining({ id: image.item.id, type: "image" })
+    ]));
+    await expect(reloaded.getContent(image.item.id)).resolves.toEqual({
+      type: "image",
+      png: Buffer.from([9])
+    });
+  });
+
+  test("preserves orphan blobs when every metadata candidate is corrupt", async () => {
+    const orphanPath = join(dir, "content", "orphan.text.bin");
+    await writeFile(orphanPath, Buffer.from([1, 2, 3]));
+    await writeFile(join(dir, "history.json"), "{", "utf8");
+    await writeFile(join(dir, "history.json.tmp"), "[]", "utf8");
+    await writeFile(join(dir, "history.json.bak"), JSON.stringify({ version: 2, items: [] }), "utf8");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+      await reloaded.init();
+
+      await expect(readFile(orphanPath)).resolves.toEqual(Buffer.from([1, 2, 3]));
+      expect(errorSpy).toHaveBeenCalledWith("Encrypted content cleanup skipped: metadata-unrecoverable");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  test("preserves orphan blobs when metadata is missing but content already exists", async () => {
+    const orphanPath = join(dir, "content", "orphan.text.bin");
+    await writeFile(orphanPath, Buffer.from([1, 2, 3]));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+      await reloaded.init();
+
+      await expect(readFile(orphanPath)).resolves.toEqual(Buffer.from([1, 2, 3]));
+      expect(errorSpy).toHaveBeenCalledWith("Encrypted content cleanup skipped: metadata-unrecoverable");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  test("recovers the metadata write chain after a write failure", async () => {
+    const added = await store.addText("alpha");
+    expect(added.ok).toBe(true);
+    if (!added.ok) throw new Error("expected text item");
+
+    const temporaryPath = join(dir, "history.json.tmp");
+    await mkdir(temporaryPath);
+    await expect(store.setPinned(added.item.id, true)).rejects.toBeDefined();
+    await rm(temporaryPath, { recursive: true });
+
+    await expect(store.setPinned(added.item.id, false)).resolves.toBe(true);
+    await store.flush();
+
+    const reloaded = new HistoryStore(dir, keyProvider, settings, { now: () => currentTime });
+    await reloaded.init();
+    expect(await reloaded.list()).toMatchObject([{ id: added.item.id, pinned: false }]);
   });
 
   test("continues revisions from the latest recovered metadata candidate", async () => {
