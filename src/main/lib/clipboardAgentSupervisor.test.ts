@@ -482,6 +482,159 @@ describe("ClipboardAgentSupervisor", () => {
     });
   });
 
+  test("preserves a pending failure when an earlier reconcile rejects late", async () => {
+    const { children, spawnMock } = createSpawnFactory();
+    const snapshotBlocked = deferred();
+    let rejectReconcile!: (error: Error) => void;
+    const reconcile = new Promise<void>((_resolve, reject) => {
+      rejectReconcile = reject;
+    });
+    const supervisor = createSupervisor({
+      spawn: spawnMock,
+      onSnapshot: async () => {
+        await snapshotBlocked.promise;
+      },
+      onReconcile: () => reconcile
+    });
+    supervisor.start();
+    ready(children[0], 0);
+    await flushTasks();
+    children[0].stdout.write(snapshotFrame(1));
+    await flushTasks();
+
+    children[0].stdout.emit("end");
+    rejectReconcile(new Error("private reconcile detail"));
+    await flushTasks();
+
+    expect(supervisor.getStatus()).toMatchObject({
+      mode: "fallback",
+      restartCount: 0,
+      lastError: "stdout-ended"
+    });
+
+    snapshotBlocked.resolve();
+    await flushTasks();
+    await flushTasks();
+
+    expect(supervisor.getStatus()).toMatchObject({
+      mode: "fallback",
+      restartCount: 1,
+      lastError: "stdout-ended"
+    });
+  });
+
+  test("preserves a pending failure when stderr arrives during drain", async () => {
+    const { children, spawnMock } = createSpawnFactory();
+    const snapshotBlocked = deferred();
+    const supervisor = createSupervisor({
+      spawn: spawnMock,
+      onSnapshot: async () => {
+        await snapshotBlocked.promise;
+      }
+    });
+    supervisor.start();
+    ready(children[0], 0);
+    await flushTasks();
+    children[0].stdout.write(snapshotFrame(1));
+    await flushTasks();
+
+    children[0].stdout.emit("end");
+    children[0].stderr.emit("data", Buffer.from("private stderr payload"));
+
+    expect(supervisor.getStatus()).toMatchObject({
+      mode: "fallback",
+      restartCount: 0,
+      lastError: "stdout-ended"
+    });
+
+    snapshotBlocked.resolve();
+    await flushTasks();
+    await flushTasks();
+
+    expect(supervisor.getStatus()).toMatchObject({
+      mode: "fallback",
+      restartCount: 1,
+      lastError: "stdout-ended"
+    });
+  });
+
+  test.each(["listener-failed", "too-large"] as const)(
+    "keeps draining after a queued helper-%s behind a pending failure",
+    async (code) => {
+      const { children, spawnMock } = createSpawnFactory();
+      const firstBlocked = deferred();
+      const seen: number[] = [];
+      const errorsAfterFailure: Array<string | null> = [];
+      let failurePublished = false;
+      const supervisor = createSupervisor({
+        spawn: spawnMock,
+        onSnapshot: async (snapshot) => {
+          seen.push(snapshot.sequence);
+          if (snapshot.sequence === 1) await firstBlocked.promise;
+        },
+        onStatusChange: (status) => {
+          if (failurePublished) errorsAfterFailure.push(status.lastError);
+        }
+      });
+      supervisor.start();
+      ready(children[0], 0);
+      await flushTasks();
+      children[0].stdout.write(Buffer.concat([
+        snapshotFrame(1),
+        encodeFrame({ version: 1, type: "error", code, sequence: 1, at: 1 }),
+        snapshotFrame(2)
+      ]));
+      await flushTasks();
+      expect(seen).toEqual([1]);
+
+      failurePublished = true;
+      children[0].stdout.emit("end");
+      firstBlocked.resolve();
+      await flushTasks();
+      await flushTasks();
+      await flushTasks();
+
+      expect(seen).toEqual([1, 2]);
+      expect(errorsAfterFailure.every((error) => error === "stdout-ended")).toBe(true);
+      expect(supervisor.getStatus()).toMatchObject({
+        mode: "fallback",
+        restartCount: 1,
+        lastError: "stdout-ended"
+      });
+    }
+  );
+
+  test("keeps draining after a queued protocol error behind a pending failure", async () => {
+    const { children, spawnMock } = createSpawnFactory();
+    const onSnapshot = vi.fn();
+    const supervisor = createSupervisor({ spawn: spawnMock, onSnapshot });
+    supervisor.start();
+
+    children[0].stdout.emit("data", Buffer.concat([
+      snapshotFrame(1, "before-ready"),
+      encodeFrame({
+        version: 1,
+        type: "ready",
+        pid: children[0].pid,
+        sequence: 1,
+        at: 1
+      }),
+      snapshotFrame(2)
+    ]));
+    children[0].stdout.emit("end");
+    await flushTasks();
+    await flushTasks();
+    await flushTasks();
+
+    expect(onSnapshot).toHaveBeenCalledTimes(1);
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ sequence: 2 }));
+    expect(supervisor.getStatus()).toMatchObject({
+      mode: "fallback",
+      restartCount: 1,
+      lastError: "stdout-ended"
+    });
+  });
+
   test("stop does not wait for a blocked failure drain", async () => {
     const { children, spawnMock } = createSpawnFactory();
     const blocked = deferred();

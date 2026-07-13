@@ -503,6 +503,7 @@ export class ClipboardAgentSupervisor {
     receivedAt: number
   ): void {
     this.status.lastEventAt = receivedAt;
+    if (context.pendingFailure) return;
     if (code === "listener-failed") {
       this.failGeneration(context, "helper-listener-failed");
       return;
@@ -529,13 +530,13 @@ export class ClipboardAgentSupervisor {
   }
 
   private recordReconcileFailure(context: GenerationContext): void {
-    if (!this.canProcessFrames(context)) return;
+    if (!this.canProcessFrames(context) || context.pendingFailure) return;
     this.status.lastError = "reconcile-failed";
     this.emitStatus();
   }
 
   private recordFixedError(context: GenerationContext, error: string): void {
-    if (!this.canProcessFrames(context)) return;
+    if (!this.canProcessFrames(context) || context.pendingFailure) return;
     this.status.lastError = error;
     this.emitStatus();
   }
@@ -545,7 +546,14 @@ export class ClipboardAgentSupervisor {
     error: string,
     exit?: { code: number | null; signal: string | null }
   ): void {
-    if (!this.isCurrent(context) || context.failed || this.phase === "stopping") return;
+    if (
+      !this.isCurrent(context) ||
+      context.failed ||
+      context.pendingFailure ||
+      this.phase === "stopping"
+    ) {
+      return;
+    }
 
     context.failed = true;
     context.pendingFailure = null;
