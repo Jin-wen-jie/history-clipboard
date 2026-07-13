@@ -1,4 +1,13 @@
-const MAX_FRAME_LENGTH = 64 * 1024 * 1024;
+/**
+ * Maximum frameLength: excludes the outer 4-byte length prefix and includes
+ * the 4-byte headerLength field, UTF-8 JSON header, and payload. Writers and
+ * queues must apply this limit to that entire encoded span after the prefix.
+ */
+export const MAX_AGENT_FRAME_LENGTH = 64 * 1024 * 1024;
+
+const MAX_INT32 = 0x7fff_ffff;
+
+// All `at` and `capturedAt` fields are Unix epoch milliseconds.
 
 export type AgentFrameHeader =
   | { version: 1; type: "ready"; pid: number; sequence: number; at: number }
@@ -68,12 +77,16 @@ function isUint32(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff;
 }
 
-function isPositiveInteger(value: unknown): value is number {
-  return Number.isInteger(value) && (value as number) > 0;
+function isPositiveInt32(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) > 0 && (value as number) <= MAX_INT32;
 }
 
-function isNonNegativeInteger(value: unknown): value is number {
-  return Number.isInteger(value) && (value as number) >= 0;
+function isNonNegativeInt32(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= MAX_INT32;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function isTimestamp(value: unknown): value is number {
@@ -105,8 +118,8 @@ function validateTextSegment(value: unknown): TextSegment {
   if (
     !isObject(value) ||
     !hasOnlyKeys(value, ["offset", "length"]) ||
-    !isNonNegativeInteger(value.offset) ||
-    !isNonNegativeInteger(value.length)
+    !isNonNegativeSafeInteger(value.offset) ||
+    !isNonNegativeSafeInteger(value.length)
   ) {
     return invalidHeader();
   }
@@ -117,10 +130,10 @@ function validatePngSegment(value: unknown): PngSegment {
   if (
     !isObject(value) ||
     !hasOnlyKeys(value, ["offset", "length", "width", "height"]) ||
-    !isNonNegativeInteger(value.offset) ||
-    !isNonNegativeInteger(value.length) ||
-    !isPositiveInteger(value.width) ||
-    !isPositiveInteger(value.height)
+    !isNonNegativeSafeInteger(value.offset) ||
+    !isNonNegativeSafeInteger(value.length) ||
+    !isPositiveInt32(value.width) ||
+    !isPositiveInt32(value.height)
   ) {
     return invalidHeader();
   }
@@ -141,7 +154,7 @@ function validateHeader(value: unknown): AgentFrameHeader {
     case "ready":
       if (
         !hasOnlyKeys(value, ["version", "type", "pid", "sequence", "at"]) ||
-        !isPositiveInteger(value.pid) ||
+        !isPositiveInt32(value.pid) ||
         !isUint32(value.sequence) ||
         !isTimestamp(value.at)
       ) {
@@ -189,7 +202,7 @@ function validateHeader(value: unknown): AgentFrameHeader {
         !GAP_REASONS.has(value.reason) ||
         (Object.hasOwn(value, "fromSequence") && !isUint32(value.fromSequence)) ||
         !isUint32(value.toSequence) ||
-        !isNonNegativeInteger(value.dropped) ||
+        !isNonNegativeInt32(value.dropped) ||
         !isTimestamp(value.at)
       ) {
         return invalidHeader();
@@ -290,44 +303,47 @@ function parseFrame(header: AgentFrameHeader, payload: Buffer): AgentFrame {
 }
 
 export class ClipboardAgentFrameParser {
-  private pending = Buffer.alloc(0);
+  private chunks: Buffer[] = [];
+  private headIndex = 0;
+  private headOffset = 0;
+  private bufferedBytes = 0;
 
+  /** Retains chunk references; callers must not mutate a chunk after push. */
   push(chunk: Buffer): AgentFrame[] {
     if (chunk.length > 0) {
-      this.pending = this.pending.length === 0
-        ? Buffer.from(chunk)
-        : Buffer.concat([this.pending, chunk]);
+      this.chunks.push(chunk);
+      this.bufferedBytes += chunk.length;
     }
 
     const frames: AgentFrame[] = [];
     try {
-      while (this.pending.length >= 4) {
-        const frameLength = this.pending.readUInt32LE(0);
+      while (this.bufferedBytes >= 4) {
+        const frameLength = this.peekUInt32LE(0);
         if (frameLength < 4) {
           throw new Error("Invalid frame length");
         }
-        if (frameLength > MAX_FRAME_LENGTH) {
+        if (frameLength > MAX_AGENT_FRAME_LENGTH) {
           throw new Error("Frame too large");
         }
 
         const totalLength = 4 + frameLength;
-        if (this.pending.length < 8) {
+        if (this.bufferedBytes < 8) {
           break;
         }
 
-        const headerLength = this.pending.readUInt32LE(4);
+        const headerLength = this.peekUInt32LE(4);
         if (headerLength > frameLength - 4) {
           throw new Error("Invalid header length");
         }
-        if (this.pending.length < totalLength) {
+        if (this.bufferedBytes < totalLength) {
           break;
         }
 
+        const encodedFrame = this.takeBytes(totalLength);
         const headerEnd = 8 + headerLength;
-        const header = validateHeader(parseJsonHeader(this.pending.subarray(8, headerEnd)));
-        const payload = this.pending.subarray(headerEnd, totalLength);
+        const header = validateHeader(parseJsonHeader(encodedFrame.subarray(8, headerEnd)));
+        const payload = encodedFrame.subarray(headerEnd, totalLength);
         frames.push(parseFrame(header, payload));
-        this.pending = Buffer.from(this.pending.subarray(totalLength));
       }
       return frames;
     } catch (error) {
@@ -337,6 +353,76 @@ export class ClipboardAgentFrameParser {
   }
 
   reset(): void {
-    this.pending = Buffer.alloc(0);
+    this.chunks = [];
+    this.headIndex = 0;
+    this.headOffset = 0;
+    this.bufferedBytes = 0;
+  }
+
+  private peekUInt32LE(relativeOffset: number): number {
+    let chunkIndex = this.headIndex;
+    let chunkOffset = this.headOffset;
+    let value = 0;
+
+    for (let byteIndex = 0; byteIndex < 4; byteIndex += 1) {
+      while (chunkOffset === this.chunks[chunkIndex].length) {
+        chunkIndex += 1;
+        chunkOffset = 0;
+      }
+      if (relativeOffset > 0) {
+        relativeOffset -= 1;
+        chunkOffset += 1;
+        byteIndex -= 1;
+        continue;
+      }
+      value += this.chunks[chunkIndex][chunkOffset] * (2 ** (byteIndex * 8));
+      chunkOffset += 1;
+    }
+    return value >>> 0;
+  }
+
+  private takeBytes(length: number): Buffer {
+    const head = this.chunks[this.headIndex];
+    const headAvailable = head.length - this.headOffset;
+    if (headAvailable >= length) {
+      const result = head.subarray(this.headOffset, this.headOffset + length);
+      this.headOffset += length;
+      this.bufferedBytes -= length;
+      if (this.headOffset === head.length) {
+        this.headIndex += 1;
+        this.headOffset = 0;
+      }
+      this.compactChunks();
+      return result;
+    }
+
+    const result = Buffer.allocUnsafe(length);
+    let written = 0;
+    while (written < length) {
+      const current = this.chunks[this.headIndex];
+      const copyLength = Math.min(current.length - this.headOffset, length - written);
+      current.copy(result, written, this.headOffset, this.headOffset + copyLength);
+      written += copyLength;
+      this.headOffset += copyLength;
+      this.bufferedBytes -= copyLength;
+      if (this.headOffset === current.length) {
+        this.headIndex += 1;
+        this.headOffset = 0;
+      }
+    }
+    this.compactChunks();
+    return result;
+  }
+
+  private compactChunks(): void {
+    if (this.headIndex === this.chunks.length) {
+      this.chunks = [];
+      this.headIndex = 0;
+      return;
+    }
+    if (this.headIndex > 0 && this.headIndex * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.headIndex);
+      this.headIndex = 0;
+    }
   }
 }

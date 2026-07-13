@@ -12,4 +12,15 @@ describe("classifySequence", () => {
   ])("classifies uint32 change from %d to %d", (previous, next, expected) => {
     expect(classifySequence(previous, next)).toEqual(expected);
   });
+
+  test.each([
+    Number.NaN,
+    -1,
+    1.5,
+    0x1_0000_0000,
+    2 ** 53
+  ])("rejects invalid uint32 sequence %s", (invalid) => {
+    expect(() => classifySequence(invalid, 0)).toThrow("Invalid sequence");
+    expect(() => classifySequence(0, invalid)).toThrow("Invalid sequence");
+  });
 });

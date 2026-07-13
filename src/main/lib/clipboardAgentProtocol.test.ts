@@ -1,11 +1,13 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   ClipboardAgentFrameParser,
   type AgentFrameHeader,
   type NativeClipboardSnapshot
 } from "./clipboardAgentProtocol";
+import * as clipboardAgentProtocol from "./clipboardAgentProtocol";
 
 const MAX_FRAME_LENGTH = 64 * 1024 * 1024;
+const MAX_INT32 = 0x7fff_ffff;
 
 function encodeFrame(header: AgentFrameHeader, payload = Buffer.alloc(0)): Buffer {
   const headerBytes = Buffer.from(JSON.stringify(header), "utf8");
@@ -48,6 +50,11 @@ function snapshotHeader(overrides: Record<string, unknown> = {}): AgentFrameHead
 }
 
 describe("ClipboardAgentFrameParser", () => {
+  test("exports the frameLength limit excluding the outer prefix", () => {
+    // frameLength includes headerLength, JSON header, and payload, but excludes its own 4-byte prefix.
+    expect(clipboardAgentProtocol).toHaveProperty("MAX_AGENT_FRAME_LENGTH", MAX_FRAME_LENGTH);
+  });
+
   test("parses multiple control frames from one chunk", () => {
     const headers: AgentFrameHeader[] = [
       { version: 1, type: "ready", pid: 42, sequence: 8, at: 1_000 },
@@ -132,6 +139,50 @@ describe("ClipboardAgentFrameParser", () => {
     }
 
     expect(frames).toEqual([header]);
+  });
+
+  test("does not concatenate the accumulated frame when chunks arrive", () => {
+    const header: AgentFrameHeader = { version: 1, type: "heartbeat", sequence: 7, at: 8 };
+    const encoded = encodeFrame(header);
+    const parser = new ClipboardAgentFrameParser();
+    const concatSpy = vi.spyOn(Buffer, "concat");
+    let concatCalls = 0;
+    let frames: ReturnType<ClipboardAgentFrameParser["push"]> = [];
+
+    try {
+      for (let offset = 0; offset < encoded.length; offset += 3) {
+        frames.push(...parser.push(encoded.subarray(offset, offset + 3)));
+      }
+      concatCalls = concatSpy.mock.calls.length;
+    } finally {
+      concatSpy.mockRestore();
+    }
+
+    expect(frames).toEqual([header]);
+    expect(concatCalls).toBe(0);
+  });
+
+  test("rejects an oversize prefix before copying a large input chunk", () => {
+    const encoded = Buffer.alloc(8 * 1024 * 1024);
+    encoded.writeUInt32LE(MAX_FRAME_LENGTH + 1, 0);
+    const parser = new ClipboardAgentFrameParser();
+    const fromSpy = vi.spyOn(Buffer, "from");
+    const concatSpy = vi.spyOn(Buffer, "concat");
+    let thrown: unknown;
+    let copyCalls = 0;
+
+    try {
+      parser.push(encoded);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      copyCalls = fromSpy.mock.calls.length + concatSpy.mock.calls.length;
+      fromSpy.mockRestore();
+      concatSpy.mockRestore();
+    }
+
+    expect(thrown).toEqual(new Error("Frame too large"));
+    expect(copyCalls).toBe(0);
   });
 
   test("retains incomplete length, header-length, and frame data", () => {
@@ -224,24 +275,55 @@ describe("ClipboardAgentFrameParser", () => {
     expect(() => new ClipboardAgentFrameParser().push(encoded)).toThrow("Frame too large");
   });
 
-  test("accepts a structurally valid frame whose frameLength is exactly 64 MiB", () => {
-    let payloadLength = MAX_FRAME_LENGTH - 4;
-    let header = snapshotHeader({ png: { offset: 0, length: payloadLength, width: 1, height: 1 } });
-    let headerBytes = Buffer.from(JSON.stringify(header), "utf8");
-
-    while (payloadLength !== MAX_FRAME_LENGTH - 4 - headerBytes.length) {
-      payloadLength = MAX_FRAME_LENGTH - 4 - headerBytes.length;
-      header = snapshotHeader({ png: { offset: 0, length: payloadLength, width: 1, height: 1 } });
-      headerBytes = Buffer.from(JSON.stringify(header), "utf8");
-    }
-
-    const encoded = Buffer.alloc(4 + MAX_FRAME_LENGTH);
+  test("waits for a frame whose frameLength is exactly 64 MiB", () => {
+    const encoded = Buffer.alloc(4);
     encoded.writeUInt32LE(MAX_FRAME_LENGTH, 0);
-    encoded.writeUInt32LE(headerBytes.length, 4);
-    headerBytes.copy(encoded, 8);
 
-    const [snapshot] = new ClipboardAgentFrameParser().push(encoded) as NativeClipboardSnapshot[];
-    expect(snapshot.png?.length).toBe(payloadLength);
+    expect(new ClipboardAgentFrameParser().push(encoded)).toEqual([]);
+  });
+
+  test("accepts valid maximum values for cross-language numeric fields", () => {
+    const headers: AgentFrameHeader[] = [
+      {
+        version: 1,
+        type: "ready",
+        pid: MAX_INT32,
+        sequence: 0xffff_ffff,
+        at: Number.MAX_SAFE_INTEGER
+      },
+      {
+        version: 1,
+        type: "gap",
+        reason: "overflow",
+        fromSequence: 0xffff_ffff,
+        toSequence: 0xffff_ffff,
+        dropped: MAX_INT32,
+        at: Number.MAX_SAFE_INTEGER
+      },
+      {
+        version: 1,
+        type: "snapshot",
+        sequence: 0xffff_ffff,
+        capturedAt: Number.MAX_SAFE_INTEGER,
+        png: { offset: 0, length: 0, width: MAX_INT32, height: MAX_INT32 }
+      }
+    ];
+    const parser = new ClipboardAgentFrameParser();
+
+    expect(parser.push(Buffer.concat(headers.map((header) => encodeFrame(header))))).toEqual([
+      headers[0],
+      headers[1],
+      {
+        version: 1,
+        type: "snapshot",
+        sequence: 0xffff_ffff,
+        capturedAt: Number.MAX_SAFE_INTEGER,
+        text: "",
+        png: Buffer.alloc(0),
+        width: MAX_INT32,
+        height: MAX_INT32
+      }
+    ]);
   });
 
   test("rejects a header length outside its frame", () => {
@@ -284,6 +366,8 @@ describe("ClipboardAgentFrameParser", () => {
     ["zero ready pid", { version: 1, type: "ready", pid: 0, sequence: 1, at: 1 }],
     ["fractional ready pid", { version: 1, type: "ready", pid: 1.5, sequence: 1, at: 1 }],
     ["string ready pid", { version: 1, type: "ready", pid: "1", sequence: 1, at: 1 }],
+    ["overflow ready pid", { version: 1, type: "ready", pid: MAX_INT32 + 1, sequence: 1, at: 1 }],
+    ["unsafe ready pid", { version: 1, type: "ready", pid: 2 ** 53, sequence: 1, at: 1 }],
     ["missing ready sequence", { version: 1, type: "ready", pid: 1, at: 1 }],
     ["negative ready sequence", { version: 1, type: "ready", pid: 1, sequence: -1, at: 1 }],
     ["overflow ready sequence", { version: 1, type: "ready", pid: 1, sequence: 0x1_0000_0000, at: 1 }],
@@ -307,6 +391,8 @@ describe("ClipboardAgentFrameParser", () => {
     ["missing dropped", { version: 1, type: "gap", reason: "overflow", toSequence: 1, at: 1 }],
     ["negative dropped", { version: 1, type: "gap", reason: "overflow", toSequence: 1, dropped: -1, at: 1 }],
     ["fractional dropped", { version: 1, type: "gap", reason: "overflow", toSequence: 1, dropped: 0.5, at: 1 }],
+    ["overflow dropped", { version: 1, type: "gap", reason: "overflow", toSequence: 1, dropped: MAX_INT32 + 1, at: 1 }],
+    ["unsafe dropped", { version: 1, type: "gap", reason: "overflow", toSequence: 1, dropped: 2 ** 53, at: 1 }],
     ["missing gap at", { version: 1, type: "gap", reason: "overflow", toSequence: 1, dropped: 0 }],
     ["missing error code", { version: 1, type: "error", at: 1 }],
     ["unknown error code", { version: 1, type: "error", code: "unknown", at: 1 }],
@@ -323,8 +409,10 @@ describe("ClipboardAgentFrameParser", () => {
     ["missing text length", { text: { offset: 0 } }],
     ["negative text offset", { text: { offset: -1, length: 0 } }],
     ["fractional text offset", { text: { offset: 0.5, length: 0 } }],
+    ["unsafe text offset", { text: { offset: 2 ** 53, length: 0 } }],
     ["negative text length", { text: { offset: 0, length: -1 } }],
     ["fractional text length", { text: { offset: 0, length: 0.5 } }],
+    ["unsafe text length", { text: { offset: 0, length: 2 ** 53 } }],
     ["extra text field", { text: { offset: 0, length: 0, encoding: "utf8" } }],
     ["non-object png", { png: [] }],
     ["missing png offset", { png: { length: 0, width: 1, height: 1 } }],
@@ -335,8 +423,12 @@ describe("ClipboardAgentFrameParser", () => {
     ["fractional png length", { png: { offset: 0, length: 0.5, width: 1, height: 1 } }],
     ["zero png width", { png: { offset: 0, length: 0, width: 0, height: 1 } }],
     ["fractional png width", { png: { offset: 0, length: 0, width: 1.5, height: 1 } }],
+    ["overflow png width", { png: { offset: 0, length: 0, width: MAX_INT32 + 1, height: 1 } }],
+    ["unsafe png width", { png: { offset: 0, length: 0, width: 2 ** 53, height: 1 } }],
     ["zero png height", { png: { offset: 0, length: 0, width: 1, height: 0 } }],
     ["fractional png height", { png: { offset: 0, length: 0, width: 1, height: 1.5 } }],
+    ["overflow png height", { png: { offset: 0, length: 0, width: 1, height: MAX_INT32 + 1 } }],
+    ["unsafe png height", { png: { offset: 0, length: 0, width: 1, height: 2 ** 53 } }],
     ["extra png field", { png: { offset: 0, length: 0, width: 1, height: 1, format: "png" } }]
   ])("rejects invalid snapshot segment field: %s", (_name, overrides) => {
     expectInvalidHeader({
@@ -387,5 +479,15 @@ describe("ClipboardAgentFrameParser", () => {
 
     expect(() => parser.push(encodeRawFrame(Buffer.from("{", "utf8")))).toThrow("Invalid header JSON");
     expect(parser.push(encodeFrame(goodHeader))).toEqual([goodHeader]);
+  });
+
+  test("throws atomically when a valid frame is followed by an invalid frame in one push", () => {
+    const parser = new ClipboardAgentFrameParser();
+    const goodHeader: AgentFrameHeader = { version: 1, type: "heartbeat", sequence: 100, at: 11 };
+    const good = encodeFrame(goodHeader);
+    const bad = encodeRawFrame(Buffer.from("{", "utf8"));
+
+    expect(() => parser.push(Buffer.concat([good, bad]))).toThrow("Invalid header JSON");
+    expect(parser.push(good)).toEqual([goodHeader]);
   });
 });
