@@ -19,6 +19,12 @@ internal static class Program
             Run("capture-sequence-classification", ClassifiesCaptureSequences);
             Run("capture-sequence-explicit-commit", CommitsOnlySuccessfulCaptures);
             Run("capture-sequence-backlog", CoalescesBackloggedSequenceObservations);
+            Run("image-candidate-fallback", FallsBackFromInvalidPngToDib);
+            Run("image-candidate-priority", PreservesImageCandidatePriority);
+            Run("image-candidate-budget-fallback", FallsBackAfterCandidateBudgetFailure);
+            Run("image-candidate-errors", ReportsFixedCandidateErrors);
+            Run("image-candidate-disposal", DisposesAllBitmapCandidates);
+            Run("image-capture-budget", BoundsCandidateAndWorkingMemory);
             Run("overflow-gap-order", OverflowGapRespectsQueuedControls);
             Run("overflow-gap-intervening-controls", OverflowGapDoesNotOvertakeInterveningControls);
             Run("overflow-gap-reposition", RepositionsExistingOverflowGap);
@@ -28,6 +34,7 @@ internal static class Program
             Run("ready-coalescing", KeepsLatestReadyInOriginalPosition);
             Run("gap-coalescing", MergesSameReasonGaps);
             Run("snapshot-ownership", SnapshotOwnsPayloadBytes);
+            Run("snapshot-owned-transfer", SnapshotOwnedTakesPayloadOwnership);
             Run("payload-visibility", DoesNotExposeMutablePayload);
             Run("strict-utf8", RejectsInvalidUtf8TextPayload);
             Run("cancel-enqueue-race", CancellationWinsCoordinatedEnqueue);
@@ -134,6 +141,153 @@ internal static class Program
         AssertEqual(1, gaps);
         AssertEqual(2, dropped);
         AssertEqual((uint)13, tracker.Watermark);
+    }
+
+    private static void FallsBackFromInvalidPngToDib()
+    {
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Png,
+            new byte[] { 1, 2, 3 }));
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Dib,
+            CreateOnePixelDib(0, 0, 255)));
+
+        CapturedImageConversionResult result =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, 16 * 1024 * 1024);
+
+        AssertEqual(null, result.ErrorCode);
+        AssertEqual(CapturedImageCandidateKind.Dib, result.SourceKind.Value);
+        AssertEqual(1, result.Width);
+        AssertEqual(1, result.Height);
+        AssertPngSignature(result.PngBytes);
+    }
+
+    private static void PreservesImageCandidatePriority()
+    {
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Png,
+            new byte[] { 1, 2, 3 }));
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.DibV5,
+            CreateOnePixelDib(0, 255, 0)));
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Dib,
+            CreateOnePixelDib(255, 0, 0)));
+
+        CapturedImageConversionResult result =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, 16 * 1024 * 1024);
+
+        AssertEqual(null, result.ErrorCode);
+        AssertEqual(CapturedImageCandidateKind.DibV5, result.SourceKind.Value);
+        AssertPngSignature(result.PngBytes);
+    }
+
+    private static void FallsBackAfterCandidateBudgetFailure()
+    {
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(CapturedImageCandidate.Failure(
+            CapturedImageCandidateKind.Png,
+            "too-large"));
+        candidates.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Dib,
+            CreateOnePixelDib(0, 0, 0)));
+
+        CapturedImageConversionResult result =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, 16 * 1024 * 1024);
+
+        AssertEqual(null, result.ErrorCode);
+        AssertEqual(CapturedImageCandidateKind.Dib, result.SourceKind.Value);
+        AssertPngSignature(result.PngBytes);
+    }
+
+    private static void ReportsFixedCandidateErrors()
+    {
+        List<CapturedImageCandidate> invalid = new List<CapturedImageCandidate>();
+        invalid.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Png,
+            new byte[] { 1, 2, 3 }));
+        CapturedImageConversionResult invalidResult =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(invalid, 16 * 1024 * 1024);
+        AssertEqual("internal", invalidResult.ErrorCode);
+
+        List<CapturedImageCandidate> tooLarge = new List<CapturedImageCandidate>();
+        tooLarge.Add(CapturedImageCandidate.FromBytes(
+            CapturedImageCandidateKind.Dib,
+            CreateOnePixelDib(0, 0, 0)));
+        CapturedImageConversionResult tooLargeResult =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(tooLarge, 1);
+        AssertEqual("too-large", tooLargeResult.ErrorCode);
+    }
+
+    private static void DisposesAllBitmapCandidates()
+    {
+        CapturedImageCandidate first = CapturedImageCandidate.FromBitmap(new System.Drawing.Bitmap(1, 1));
+        CapturedImageCandidate second = CapturedImageCandidate.FromBitmap(new System.Drawing.Bitmap(1, 1));
+        List<CapturedImageCandidate> candidates = new List<CapturedImageCandidate>();
+        candidates.Add(first);
+        candidates.Add(second);
+
+        CapturedImageConversionResult result =
+            ClipboardSnapshotReader.ConvertFirstValidCandidate(candidates, 16 * 1024 * 1024);
+
+        AssertEqual(null, result.ErrorCode);
+        AssertTrue(first.IsDisposed);
+        AssertTrue(second.IsDisposed);
+    }
+
+    private static void BoundsCandidateAndWorkingMemory()
+    {
+        CaptureMemoryBudget rawBudget = new CaptureMemoryBudget(64);
+        AssertTrue(rawBudget.TryReserve(40));
+        AssertTrue(!rawBudget.TryReserve(40));
+        AssertTrue(rawBudget.TryReserve(24));
+        AssertEqual((long)64, rawBudget.UsedBytes);
+
+        long first = ClipboardSnapshotReader.EstimateWorkingBytes(
+            CapturedImageCandidateKind.Dib,
+            32L * 1024L * 1024L,
+            64L * 1024L * 1024L,
+            4096,
+            4096);
+        CaptureMemoryBudget workingBudget = new CaptureMemoryBudget(first);
+        AssertTrue(workingBudget.TryReserve(first));
+        AssertTrue(!workingBudget.TryReserve(first));
+    }
+
+    private static byte[] CreateOnePixelDib(byte blue, byte green, byte red)
+    {
+        byte[] dib = new byte[44];
+        WriteUInt32LittleEndian(dib, 0, 40);
+        WriteUInt32LittleEndian(dib, 4, 1);
+        WriteUInt32LittleEndian(dib, 8, 1);
+        dib[12] = 1;
+        dib[14] = 32;
+        WriteUInt32LittleEndian(dib, 20, 4);
+        dib[40] = blue;
+        dib[41] = green;
+        dib[42] = red;
+        dib[43] = 255;
+        return dib;
+    }
+
+    private static void WriteUInt32LittleEndian(byte[] bytes, int offset, uint value)
+    {
+        bytes[offset] = (byte)value;
+        bytes[offset + 1] = (byte)(value >> 8);
+        bytes[offset + 2] = (byte)(value >> 16);
+        bytes[offset + 3] = (byte)(value >> 24);
+    }
+
+    private static void AssertPngSignature(byte[] png)
+    {
+        byte[] signature = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 };
+        AssertTrue(png != null && png.Length >= signature.Length);
+        for (int index = 0; index < signature.Length; index++)
+        {
+            AssertEqual(signature[index], png[index]);
+        }
     }
 
     private static void OverflowGapRespectsQueuedControls()
@@ -288,6 +442,19 @@ internal static class Program
 
         byte[] encodedPayload = EncodePayload(frame);
         AssertBytesEqual(Encoding.UTF8.GetBytes("abc"), encodedPayload);
+    }
+
+    private static void SnapshotOwnedTakesPayloadOwnership()
+    {
+        byte[] payload = Encoding.UTF8.GetBytes("owned");
+        AgentFrame frame = AgentFrame.SnapshotOwned(
+            101,
+            TestTimestamp,
+            payload,
+            new AgentTextSegment(0, payload.Length),
+            null);
+
+        AssertTrue(object.ReferenceEquals(payload, frame.PayloadBytes));
     }
 
     private static void DoesNotExposeMutablePayload()

@@ -112,7 +112,7 @@ namespace HistoryClipboard.ClipboardListener
             Buffer.BlockCopy(text, 0, payload, 0, text.Length);
             Buffer.BlockCopy(png, 0, payload, text.Length, png.Length);
 
-            AgentFrame snapshot = AgentFrame.Snapshot(
+            AgentFrame snapshot = AgentFrame.SnapshotOwned(
                 0,
                 timestamp,
                 payload,
@@ -310,22 +310,12 @@ namespace HistoryClipboard.ClipboardListener
             errorCode = null;
             try
             {
-                byte[] textBytes = null;
-                if (result.HasText)
-                {
-                    int byteCount = StrictUtf8.GetByteCount(result.Text);
-                    if (byteCount > AgentProtocol.MaxFrameLength)
-                    {
-                        errorCode = "too-large";
-                        return false;
-                    }
-                    textBytes = StrictUtf8.GetBytes(result.Text);
-                }
-
-                int textLength = textBytes == null ? 0 : textBytes.Length;
+                int textLength = result.HasText
+                    ? StrictUtf8.GetByteCount(result.Text)
+                    : 0;
                 int pngLength = result.PngBytes == null ? 0 : result.PngBytes.Length;
                 int payloadLength = checked(textLength + pngLength);
-                if (payloadLength > AgentProtocol.MaxFrameLength)
+                if (payloadLength > AgentProtocol.MaxSnapshotPayloadLength)
                 {
                     errorCode = "too-large";
                     return false;
@@ -334,7 +324,17 @@ namespace HistoryClipboard.ClipboardListener
                 byte[] payload = new byte[payloadLength];
                 if (textLength > 0)
                 {
-                    Buffer.BlockCopy(textBytes, 0, payload, 0, textLength);
+                    int encoded = StrictUtf8.GetBytes(
+                        result.Text,
+                        0,
+                        result.Text.Length,
+                        payload,
+                        0);
+                    if (encoded != textLength)
+                    {
+                        errorCode = "internal";
+                        return false;
+                    }
                 }
                 if (pngLength > 0)
                 {
@@ -351,7 +351,7 @@ namespace HistoryClipboard.ClipboardListener
                         pngLength,
                         result.PngWidth,
                         result.PngHeight);
-                frame = AgentFrame.Snapshot(
+                frame = AgentFrame.SnapshotOwned(
                     result.Sequence,
                     result.CapturedAt,
                     payload,

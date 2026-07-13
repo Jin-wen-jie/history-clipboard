@@ -142,6 +142,27 @@ namespace HistoryClipboard.ClipboardListener
             AgentTextSegment text,
             AgentPngSegment png)
         {
+            return CreateSnapshot(sequence, capturedAt, payload, text, png, true);
+        }
+
+        internal static AgentFrame SnapshotOwned(
+            uint sequence,
+            long capturedAt,
+            byte[] payload,
+            AgentTextSegment text,
+            AgentPngSegment png)
+        {
+            return CreateSnapshot(sequence, capturedAt, payload, text, png, false);
+        }
+
+        private static AgentFrame CreateSnapshot(
+            uint sequence,
+            long capturedAt,
+            byte[] payload,
+            AgentTextSegment text,
+            AgentPngSegment png,
+            bool copyPayload)
+        {
             if (payload == null)
             {
                 throw new ArgumentNullException("payload");
@@ -154,7 +175,7 @@ namespace HistoryClipboard.ClipboardListener
             frame.HasSequence = true;
             frame.Sequence = sequence;
             frame.CapturedAt = capturedAt;
-            frame.PayloadBytes = CopyPayload(payload);
+            frame.PayloadBytes = copyPayload ? CopyPayload(payload) : payload;
             frame.Text = text;
             frame.Png = png;
             return frame;
@@ -296,6 +317,9 @@ namespace HistoryClipboard.ClipboardListener
     public static class AgentProtocol
     {
         public const int MaxFrameLength = 64 * 1024 * 1024;
+        internal const int MaxSnapshotHeaderBytes = 512;
+        internal const int MaxSnapshotPayloadLength =
+            MaxFrameLength - 4 - MaxSnapshotHeaderBytes;
         internal const long MaxJavaScriptSafeInteger = 9007199254740991L;
 
         public static void WriteFrame(Stream output, AgentFrame frame)

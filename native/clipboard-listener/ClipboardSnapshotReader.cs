@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -67,6 +68,171 @@ namespace HistoryClipboard.ClipboardListener
         }
     }
 
+    internal enum CapturedImageCandidateKind
+    {
+        Png,
+        DibV5,
+        Dib,
+        Bitmap
+    }
+
+    internal sealed class CapturedImageCandidate : IDisposable
+    {
+        private CapturedImageCandidate(
+            CapturedImageCandidateKind kind,
+            byte[] bytes,
+            Bitmap bitmap,
+            long storedBytes,
+            string errorCode)
+        {
+            Kind = kind;
+            Bytes = bytes;
+            Bitmap = bitmap;
+            StoredBytes = storedBytes;
+            ErrorCode = errorCode;
+        }
+
+        internal CapturedImageCandidateKind Kind { get; private set; }
+        internal byte[] Bytes { get; private set; }
+        internal Bitmap Bitmap { get; private set; }
+        internal long StoredBytes { get; private set; }
+        internal string ErrorCode { get; private set; }
+        internal bool IsDisposed { get; private set; }
+
+        internal static CapturedImageCandidate FromBytes(
+            CapturedImageCandidateKind kind,
+            byte[] bytes)
+        {
+            if (bytes == null)
+            {
+                throw new ArgumentNullException("bytes");
+            }
+            if (kind == CapturedImageCandidateKind.Bitmap)
+            {
+                throw new ArgumentException("Bitmap candidates require a bitmap.", "kind");
+            }
+            return new CapturedImageCandidate(kind, bytes, null, bytes.Length, null);
+        }
+
+        internal static CapturedImageCandidate FromBitmap(Bitmap bitmap)
+        {
+            if (bitmap == null)
+            {
+                throw new ArgumentNullException("bitmap");
+            }
+            long storedBytes = checked((long)bitmap.Width * bitmap.Height * 4L);
+            return new CapturedImageCandidate(
+                CapturedImageCandidateKind.Bitmap,
+                null,
+                bitmap,
+                storedBytes,
+                null);
+        }
+
+        internal static CapturedImageCandidate Failure(
+            CapturedImageCandidateKind kind,
+            string errorCode)
+        {
+            if (errorCode != "internal" && errorCode != "too-large")
+            {
+                throw new ArgumentException("Invalid candidate error.", "errorCode");
+            }
+            return new CapturedImageCandidate(kind, null, null, 0, errorCode);
+        }
+
+        public void Dispose()
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+            IsDisposed = true;
+            if (Bitmap != null)
+            {
+                Bitmap.Dispose();
+                Bitmap = null;
+            }
+        }
+    }
+
+    internal sealed class CapturedImageConversionResult
+    {
+        private CapturedImageConversionResult()
+        {
+        }
+
+        internal byte[] PngBytes { get; private set; }
+        internal int Width { get; private set; }
+        internal int Height { get; private set; }
+        internal CapturedImageCandidateKind? SourceKind { get; private set; }
+        internal string ErrorCode { get; private set; }
+
+        internal static CapturedImageConversionResult Empty()
+        {
+            return new CapturedImageConversionResult();
+        }
+
+        internal static CapturedImageConversionResult Success(
+            CapturedImageCandidateKind sourceKind,
+            byte[] pngBytes,
+            int width,
+            int height)
+        {
+            CapturedImageConversionResult result = new CapturedImageConversionResult();
+            result.SourceKind = sourceKind;
+            result.PngBytes = pngBytes;
+            result.Width = width;
+            result.Height = height;
+            return result;
+        }
+
+        internal static CapturedImageConversionResult Failure(string errorCode)
+        {
+            CapturedImageConversionResult result = new CapturedImageConversionResult();
+            result.ErrorCode = errorCode;
+            return result;
+        }
+    }
+
+    internal sealed class CaptureMemoryBudget
+    {
+        internal CaptureMemoryBudget(long limitBytes)
+        {
+            if (limitBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("limitBytes");
+            }
+            LimitBytes = limitBytes;
+        }
+
+        internal long LimitBytes { get; private set; }
+        internal long UsedBytes { get; private set; }
+        internal long RemainingBytes { get { return LimitBytes - UsedBytes; } }
+
+        internal bool TryReserve(long bytes)
+        {
+            if (bytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("bytes");
+            }
+            if (bytes > LimitBytes - UsedBytes)
+            {
+                return false;
+            }
+            UsedBytes += bytes;
+            return true;
+        }
+
+        internal void Release(long bytes)
+        {
+            if (bytes < 0 || bytes > UsedBytes)
+            {
+                throw new ArgumentOutOfRangeException("bytes");
+            }
+            UsedBytes -= bytes;
+        }
+    }
+
     internal sealed class ClipboardSnapshotReader
     {
         private const int OpenTimeoutMilliseconds = 1000;
@@ -74,6 +240,9 @@ namespace HistoryClipboard.ClipboardListener
         private const int MaxClipboardBytes = AgentProtocol.MaxFrameLength;
         private const int MaxImageDimension = 32768;
         private const long MaxImagePixels = 16L * 1024L * 1024L;
+        private const long EstimatedPngOverheadBytes = 64L * 1024L;
+        internal const long MaxCapturedImageCandidateBytes = 64L * 1024L * 1024L;
+        internal const long MaxCaptureWorkingBytes = 128L * 1024L * 1024L;
 
         private static readonly Encoding StrictUnicode = new UnicodeEncoding(false, false, true);
         private static readonly byte[] PngSignature =
@@ -98,7 +267,7 @@ namespace HistoryClipboard.ClipboardListener
 
             bool hasText = false;
             byte[] unicodeBytes = null;
-            RawImageData rawImage = null;
+            List<CapturedImageCandidate> imageCandidates = new List<CapturedImageCandidate>();
             uint after = observed;
             long capturedAt = 0;
             string errorCode = null;
@@ -106,7 +275,7 @@ namespace HistoryClipboard.ClipboardListener
             try
             {
                 ReadUnicodeText(out hasText, out unicodeBytes, ref errorCode);
-                rawImage = ReadImage(ref errorCode);
+                ReadImageCandidates(imageCandidates);
                 after = NativeMethods.GetClipboardSequenceNumber();
                 capturedAt = AgentFrame.CurrentUnixMilliseconds();
                 if (after != before)
@@ -132,20 +301,11 @@ namespace HistoryClipboard.ClipboardListener
                 MergeError(ref errorCode, "internal");
             }
 
-            PngData png = null;
-            try
+            CapturedImageConversionResult image =
+                ConvertFirstValidCandidate(imageCandidates, MaxCaptureWorkingBytes);
+            if (image.ErrorCode != null)
             {
-                if (rawImage != null)
-                {
-                    png = ConvertImage(rawImage, ref errorCode);
-                }
-            }
-            finally
-            {
-                if (rawImage != null)
-                {
-                    rawImage.Dispose();
-                }
+                MergeError(ref errorCode, image.ErrorCode);
             }
 
             return ClipboardSnapshotResult.Success(
@@ -154,9 +314,9 @@ namespace HistoryClipboard.ClipboardListener
                 sequenceAdvanced,
                 hasText,
                 text,
-                png == null ? null : png.Bytes,
-                png == null ? 0 : png.Width,
-                png == null ? 0 : png.Height,
+                image.PngBytes,
+                image.Width,
+                image.Height,
                 capturedAt,
                 errorCode);
         }
@@ -210,7 +370,7 @@ namespace HistoryClipboard.ClipboardListener
             }
 
             IntPtr handle = NativeMethods.GetClipboardData(NativeMethods.CF_UNICODETEXT);
-            CopyStatus status = CopyGlobalMemory(handle, out unicodeBytes);
+            CopyStatus status = CopyGlobalMemory(handle, MaxClipboardBytes, out unicodeBytes);
             if (status == CopyStatus.Success)
             {
                 hasText = true;
@@ -220,75 +380,101 @@ namespace HistoryClipboard.ClipboardListener
             MergeError(ref errorCode, status == CopyStatus.TooLarge ? "too-large" : "internal");
         }
 
-        private RawImageData ReadImage(ref string errorCode)
+        private void ReadImageCandidates(List<CapturedImageCandidate> candidates)
         {
-            RawImageData image;
-            if (_pngFormat != 0 && TryReadGlobalImage(_pngFormat, RawImageKind.Png, out image, ref errorCode))
+            CaptureMemoryBudget budget = new CaptureMemoryBudget(MaxCapturedImageCandidateBytes);
+            if (_pngFormat != 0)
             {
-                return image;
+                TryReadGlobalImageCandidate(
+                    _pngFormat,
+                    CapturedImageCandidateKind.Png,
+                    budget,
+                    candidates);
             }
-            if (TryReadGlobalImage(NativeMethods.CF_DIBV5, RawImageKind.Dib, out image, ref errorCode))
-            {
-                return image;
-            }
-            if (TryReadGlobalImage(NativeMethods.CF_DIB, RawImageKind.Dib, out image, ref errorCode))
-            {
-                return image;
-            }
-            if (TryReadBitmap(out image, ref errorCode))
-            {
-                return image;
-            }
-            return null;
+            TryReadGlobalImageCandidate(
+                NativeMethods.CF_DIBV5,
+                CapturedImageCandidateKind.DibV5,
+                budget,
+                candidates);
+            TryReadGlobalImageCandidate(
+                NativeMethods.CF_DIB,
+                CapturedImageCandidateKind.Dib,
+                budget,
+                candidates);
+            TryReadBitmapCandidate(budget, candidates);
         }
 
-        private static bool TryReadGlobalImage(
+        private static void TryReadGlobalImageCandidate(
             uint format,
-            RawImageKind kind,
-            out RawImageData image,
-            ref string errorCode)
+            CapturedImageCandidateKind kind,
+            CaptureMemoryBudget budget,
+            List<CapturedImageCandidate> candidates)
         {
-            image = null;
             if (!NativeMethods.IsClipboardFormatAvailable(format))
             {
-                return false;
+                return;
             }
 
             byte[] bytes;
-            CopyStatus status = CopyGlobalMemory(NativeMethods.GetClipboardData(format), out bytes);
+            CopyStatus status = CopyGlobalMemory(
+                NativeMethods.GetClipboardData(format),
+                budget.RemainingBytes,
+                out bytes);
             if (status == CopyStatus.Success)
             {
-                image = new RawImageData(kind, bytes, null);
-                return true;
+                if (budget.TryReserve(bytes.Length))
+                {
+                    candidates.Add(CapturedImageCandidate.FromBytes(kind, bytes));
+                    return;
+                }
+                status = CopyStatus.TooLarge;
             }
 
-            MergeError(ref errorCode, status == CopyStatus.TooLarge ? "too-large" : "internal");
-            return false;
+            candidates.Add(CapturedImageCandidate.Failure(
+                kind,
+                status == CopyStatus.TooLarge ? "too-large" : "internal"));
         }
 
-        private static bool TryReadBitmap(out RawImageData image, ref string errorCode)
+        private static void TryReadBitmapCandidate(
+            CaptureMemoryBudget budget,
+            List<CapturedImageCandidate> candidates)
         {
-            image = null;
             if (!NativeMethods.IsClipboardFormatAvailable(NativeMethods.CF_BITMAP))
             {
-                return false;
+                return;
             }
 
             IntPtr handle = NativeMethods.GetClipboardData(NativeMethods.CF_BITMAP);
             if (handle == IntPtr.Zero)
             {
-                MergeError(ref errorCode, "internal");
-                return false;
+                candidates.Add(CapturedImageCandidate.Failure(
+                    CapturedImageCandidateKind.Bitmap,
+                    "internal"));
+                return;
             }
 
+            long reservedBytes = 0;
             try
             {
                 using (Bitmap clipboardBitmap = Image.FromHbitmap(handle))
                 {
                     if (!DimensionsAreValid(clipboardBitmap.Width, clipboardBitmap.Height))
                     {
-                        MergeError(ref errorCode, "too-large");
-                        return false;
+                        candidates.Add(CapturedImageCandidate.Failure(
+                            CapturedImageCandidateKind.Bitmap,
+                            "too-large"));
+                        return;
+                    }
+
+                    reservedBytes = checked(
+                        (long)clipboardBitmap.Width * clipboardBitmap.Height * 4L);
+                    if (!budget.TryReserve(reservedBytes))
+                    {
+                        candidates.Add(CapturedImageCandidate.Failure(
+                            CapturedImageCandidateKind.Bitmap,
+                            "too-large"));
+                        reservedBytes = 0;
+                        return;
                     }
 
                     Bitmap owned = new Bitmap(
@@ -302,9 +488,10 @@ namespace HistoryClipboard.ClipboardListener
                             graphics.Clear(Color.Transparent);
                             graphics.DrawImageUnscaled(clipboardBitmap, 0, 0);
                         }
-                        image = new RawImageData(RawImageKind.Bitmap, null, owned);
+                        candidates.Add(CapturedImageCandidate.FromBitmap(owned));
                         owned = null;
-                        return true;
+                        reservedBytes = 0;
+                        return;
                     }
                     finally
                     {
@@ -315,14 +502,32 @@ namespace HistoryClipboard.ClipboardListener
                     }
                 }
             }
+            catch (OutOfMemoryException)
+            {
+                if (reservedBytes != 0)
+                {
+                    budget.Release(reservedBytes);
+                }
+                candidates.Add(CapturedImageCandidate.Failure(
+                    CapturedImageCandidateKind.Bitmap,
+                    "too-large"));
+            }
             catch
             {
-                MergeError(ref errorCode, "internal");
-                return false;
+                if (reservedBytes != 0)
+                {
+                    budget.Release(reservedBytes);
+                }
+                candidates.Add(CapturedImageCandidate.Failure(
+                    CapturedImageCandidateKind.Bitmap,
+                    "internal"));
             }
         }
 
-        private static CopyStatus CopyGlobalMemory(IntPtr handle, out byte[] bytes)
+        private static CopyStatus CopyGlobalMemory(
+            IntPtr handle,
+            long maxBytes,
+            out byte[] bytes)
         {
             bytes = null;
             if (handle == IntPtr.Zero)
@@ -335,7 +540,10 @@ namespace HistoryClipboard.ClipboardListener
             {
                 return CopyStatus.Invalid;
             }
-            if (size > MaxClipboardBytes || size > int.MaxValue)
+            if (maxBytes < 0
+                || size > MaxClipboardBytes
+                || size > (ulong)maxBytes
+                || size > int.MaxValue)
             {
                 return CopyStatus.TooLarge;
             }
@@ -397,30 +605,243 @@ namespace HistoryClipboard.ClipboardListener
             }
         }
 
-        private static PngData ConvertImage(RawImageData image, ref string errorCode)
+        internal static CapturedImageConversionResult ConvertFirstValidCandidate(
+            IList<CapturedImageCandidate> candidates,
+            long maxWorkingBytes)
         {
+            if (candidates == null)
+            {
+                throw new ArgumentNullException("candidates");
+            }
+            if (maxWorkingBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException("maxWorkingBytes");
+            }
+
+            string errorCode = null;
+            bool sawCandidate = false;
+            long retainedBytes = 0;
             try
             {
-                if (image.Kind == RawImageKind.Png)
+                for (int index = 0; index < candidates.Count; index++)
                 {
-                    return ValidatePng(image.Bytes);
+                    CapturedImageCandidate candidate = candidates[index];
+                    if (candidate != null)
+                    {
+                        retainedBytes = checked(retainedBytes + candidate.StoredBytes);
+                    }
                 }
-                if (image.Kind == RawImageKind.Dib)
+            }
+            catch (OverflowException)
+            {
+                retainedBytes = long.MaxValue;
+            }
+
+            try
+            {
+                for (int index = 0; index < candidates.Count; index++)
                 {
-                    return ConvertDib(image.Bytes);
+                    CapturedImageCandidate candidate = candidates[index];
+                    if (candidate == null)
+                    {
+                        MergeError(ref errorCode, "internal");
+                        continue;
+                    }
+                    if (candidate.ErrorCode != null)
+                    {
+                        MergeError(ref errorCode, candidate.ErrorCode);
+                        continue;
+                    }
+
+                    sawCandidate = true;
+                    try
+                    {
+                        int width;
+                        int height;
+                        GetCandidateDimensions(candidate, out width, out height);
+                        long estimatedBytes = EstimateWorkingBytes(
+                            candidate.Kind,
+                            candidate.StoredBytes,
+                            retainedBytes,
+                            width,
+                            height);
+                        if (estimatedBytes > maxWorkingBytes)
+                        {
+                            throw new CaptureTooLargeException();
+                        }
+
+                        PngData png;
+                        if (candidate.Kind == CapturedImageCandidateKind.Png)
+                        {
+                            png = ValidatePng(candidate.Bytes);
+                        }
+                        else if (candidate.Kind == CapturedImageCandidateKind.DibV5
+                            || candidate.Kind == CapturedImageCandidateKind.Dib)
+                        {
+                            png = ConvertDib(candidate.Bytes);
+                        }
+                        else
+                        {
+                            png = EncodeBitmap(candidate.Bitmap);
+                        }
+                        return CapturedImageConversionResult.Success(
+                            candidate.Kind,
+                            png.Bytes,
+                            png.Width,
+                            png.Height);
+                    }
+                    catch (CaptureTooLargeException)
+                    {
+                        MergeError(ref errorCode, "too-large");
+                    }
+                    catch
+                    {
+                        MergeError(ref errorCode, "internal");
+                    }
                 }
-                return EncodeBitmap(image.Bitmap);
+
+                if (!sawCandidate && errorCode == null)
+                {
+                    return CapturedImageConversionResult.Empty();
+                }
+                return CapturedImageConversionResult.Failure(errorCode ?? "internal");
             }
-            catch (CaptureTooLargeException)
+            finally
             {
-                MergeError(ref errorCode, "too-large");
-                return null;
+                for (int index = 0; index < candidates.Count; index++)
+                {
+                    if (candidates[index] != null)
+                    {
+                        candidates[index].Dispose();
+                    }
+                }
             }
-            catch
+        }
+
+        internal static long EstimateWorkingBytes(
+            CapturedImageCandidateKind kind,
+            long rawBytes,
+            long retainedCandidateBytes,
+            int width,
+            int height)
+        {
+            if (rawBytes < 0 || retainedCandidateBytes < 0)
             {
-                MergeError(ref errorCode, "internal");
-                return null;
+                throw new ArgumentOutOfRangeException();
             }
+            EnsureDimensions(width, height);
+
+            try
+            {
+                long pixelBytes = checked((long)width * height * 4L);
+                long estimatedPngBytes = checked(pixelBytes + EstimatedPngOverheadBytes);
+                if (kind == CapturedImageCandidateKind.Png)
+                {
+                    return checked(retainedCandidateBytes + checked(pixelBytes * 2L));
+                }
+                if (kind == CapturedImageCandidateKind.DibV5
+                    || kind == CapturedImageCandidateKind.Dib)
+                {
+                    long bitmapWrapper = checked(rawBytes + 14L);
+                    return checked(
+                        retainedCandidateBytes
+                        + bitmapWrapper
+                        + checked(pixelBytes * 2L)
+                        + checked(estimatedPngBytes * 2L));
+                }
+                return checked(retainedCandidateBytes + checked(estimatedPngBytes * 2L));
+            }
+            catch (OverflowException)
+            {
+                throw new CaptureTooLargeException();
+            }
+        }
+
+        private static void GetCandidateDimensions(
+            CapturedImageCandidate candidate,
+            out int width,
+            out int height)
+        {
+            if (candidate.Kind == CapturedImageCandidateKind.Png)
+            {
+                GetPngDimensions(candidate.Bytes, out width, out height);
+                return;
+            }
+            if (candidate.Kind == CapturedImageCandidateKind.DibV5
+                || candidate.Kind == CapturedImageCandidateKind.Dib)
+            {
+                GetDibDimensions(candidate.Bytes, out width, out height);
+                return;
+            }
+            if (candidate.Bitmap == null)
+            {
+                throw new InvalidDataException();
+            }
+            width = candidate.Bitmap.Width;
+            height = candidate.Bitmap.Height;
+            EnsureDimensions(width, height);
+        }
+
+        private static void GetPngDimensions(byte[] bytes, out int width, out int height)
+        {
+            if (bytes == null || bytes.Length < 33)
+            {
+                throw new InvalidDataException();
+            }
+            for (int index = 0; index < PngSignature.Length; index++)
+            {
+                if (bytes[index] != PngSignature[index])
+                {
+                    throw new InvalidDataException();
+                }
+            }
+            if (ReadUInt32BigEndian(bytes, 8) != 13
+                || bytes[12] != (byte)'I'
+                || bytes[13] != (byte)'H'
+                || bytes[14] != (byte)'D'
+                || bytes[15] != (byte)'R')
+            {
+                throw new InvalidDataException();
+            }
+
+            uint encodedWidth = ReadUInt32BigEndian(bytes, 16);
+            uint encodedHeight = ReadUInt32BigEndian(bytes, 20);
+            if (encodedWidth > int.MaxValue || encodedHeight > int.MaxValue)
+            {
+                throw new CaptureTooLargeException();
+            }
+            width = (int)encodedWidth;
+            height = (int)encodedHeight;
+            EnsureDimensions(width, height);
+        }
+
+        private static void GetDibDimensions(byte[] dib, out int width, out int height)
+        {
+            if (dib == null || dib.Length < 12)
+            {
+                throw new InvalidDataException();
+            }
+            uint headerSizeValue = ReadUInt32LittleEndian(dib, 0);
+            if (headerSizeValue == 12)
+            {
+                width = ReadUInt16LittleEndian(dib, 4);
+                height = ReadUInt16LittleEndian(dib, 6);
+            }
+            else
+            {
+                if (headerSizeValue < 40 || headerSizeValue > int.MaxValue || headerSizeValue > dib.Length)
+                {
+                    throw new InvalidDataException();
+                }
+                width = ReadInt32LittleEndian(dib, 4);
+                int signedHeight = ReadInt32LittleEndian(dib, 8);
+                if (signedHeight == int.MinValue)
+                {
+                    throw new CaptureTooLargeException();
+                }
+                height = Math.Abs(signedHeight);
+            }
+            EnsureDimensions(width, height);
         }
 
         private static PngData ValidatePng(byte[] bytes)
@@ -832,36 +1253,6 @@ namespace HistoryClipboard.ClipboardListener
             Success,
             Invalid,
             TooLarge
-        }
-
-        private enum RawImageKind
-        {
-            Png,
-            Dib,
-            Bitmap
-        }
-
-        private sealed class RawImageData : IDisposable
-        {
-            internal RawImageData(RawImageKind kind, byte[] bytes, Bitmap bitmap)
-            {
-                Kind = kind;
-                Bytes = bytes;
-                Bitmap = bitmap;
-            }
-
-            internal RawImageKind Kind { get; private set; }
-            internal byte[] Bytes { get; private set; }
-            internal Bitmap Bitmap { get; private set; }
-
-            public void Dispose()
-            {
-                if (Bitmap != null)
-                {
-                    Bitmap.Dispose();
-                    Bitmap = null;
-                }
-            }
         }
 
         private sealed class PngData
