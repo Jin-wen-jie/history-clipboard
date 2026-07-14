@@ -1,8 +1,9 @@
-// afterPack hook for electron-builder
-// Removes unnecessary Electron files to reduce installer size
+// afterPack hook for electron-builder.
+// Removes unnecessary Electron files and validates the packaged helper.
 exports.default = async function (context) {
   const fs = require('fs')
   const path = require('path')
+  const { spawnSync } = require('child_process')
 
   const appDir = context.appOutDir
 
@@ -25,6 +26,18 @@ exports.default = async function (context) {
     const size = fs.statSync(chromiumLicense).size
     fs.unlinkSync(chromiumLicense)
     console.log(`[afterPack] Removed LICENSES.chromium.html (${(size / 1024 / 1024).toFixed(1)}MB)`)
+  }
+
+  const helper = path.join(appDir, 'resources', 'clipboard-listener.exe')
+  if (!fs.existsSync(helper)) {
+    throw new Error('[afterPack] Packaged clipboard helper is missing')
+  }
+  const selfTest = spawnSync(helper, ['--self-test'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true
+  })
+  if (selfTest.error || selfTest.status !== 0) {
+    throw new Error('[afterPack] Packaged clipboard helper self-test failed')
   }
 
   console.log('[afterPack] Cleanup complete')

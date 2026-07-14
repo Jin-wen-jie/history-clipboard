@@ -7,12 +7,14 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "pretest": "npm run build:helper",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "tsc --noEmit && electron-vite build",
+    "build": "npm run build:helper && tsc --noEmit && electron-vite build",
     "build:helper": "node scripts/buildClipboardListener.cjs",
     "test:helper": "node scripts/buildClipboardListener.cjs --tests && build\\clipboard-listener-tests.exe",
-    "dist": "electron-builder --win nsis"
+    "dist": "npm run build && electron-builder --win nsis",
+    "dist:ci": "npm run build && node scripts/buildCiArtifacts.cjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
@@ -44,6 +46,12 @@
     "files": [
       "out/**/*",
       "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "build/clipboard-listener.exe",
+        "to": "clipboard-listener.exe"
+      }
     ],
     "extraMetadata": {
       "author": "Jin-wen-jie"

@@ -20,6 +20,14 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw -Encoding utf8 package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version v$version"
+          }
+
       - run: npm ci
       - run: npm test
       - run: npm run build

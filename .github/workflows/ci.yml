@@ -20,4 +20,20 @@ jobs:
 
       - run: npm ci
       - run: npm test
-      - run: npm run build
+      - name: Build update artifacts without publishing
+        env:
+          PUBLISH_FOR_PULL_REQUEST: "true"
+        run: npm run dist:ci
+
+      - name: Verify packaged clipboard helper
+        run: node scripts/verifyClipboardListener.cjs "release\win-unpacked\resources\clipboard-listener.exe"
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
