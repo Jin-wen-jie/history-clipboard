@@ -76,7 +76,7 @@ export function App() {
         onSaveSettings={(patch) => void updateEditableSettings(patch)}
         addToast={addToast}
       />
-      {(startupState?.pendingDecision === true || startupActionError !== null) && (
+      {startupState?.pendingDecision === true && startupActionError === null && (
         <StartupPrompt error={startupActionError} onChoose={setStartupEnabled} />
       )}
       <ToastContainer toasts={toasts} onRemove={removeToast} />

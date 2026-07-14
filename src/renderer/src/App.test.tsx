@@ -224,7 +224,7 @@ describe("App", () => {
     expect(setStartupEnabled).not.toHaveBeenCalled();
   });
 
-  test("keeps the startup prompt open when choosing fails", async () => {
+  test("unblocks the history list when choosing startup behavior fails", async () => {
     const setStartupEnabled = vi.fn<ClipboardHistoryApi["setStartupEnabled"]>()
       .mockRejectedValue(new Error("启动设置失败"));
     window.clipHistory = mockClipHistory({
@@ -236,12 +236,12 @@ describe("App", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "启用后台记录" }));
 
-    expect((await screen.findByRole("alert")).textContent).toBe("启动设置失败");
-    expect(screen.getByRole("dialog", { name: "后台记录" })).toBeTruthy();
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "启用后台记录" }).disabled).toBe(false);
+    await waitFor(() => expect(setStartupEnabled).toHaveBeenCalledWith(true));
+    expect(screen.queryByRole("dialog", { name: "后台记录" })).toBeNull();
+    expect(screen.getByRole("listbox", { name: "剪贴板历史" })).toBeTruthy();
   });
 
-  test("keeps the startup prompt retryable when the startup API resolves with an error state", async () => {
+  test("keeps the startup setting retryable without blocking the history list", async () => {
     const setStartupEnabled = vi.fn<ClipboardHistoryApi["setStartupEnabled"]>()
       .mockResolvedValueOnce(startupState({
         desiredEnabled: true,
@@ -265,14 +265,16 @@ describe("App", () => {
     const enableButton = await screen.findByRole<HTMLButtonElement>("button", { name: "启用后台记录" });
     fireEvent.click(enableButton);
 
-    expect((await screen.findByRole("alert")).textContent).toBe("启动设置失败");
-    expect(screen.getByRole("dialog", { name: "后台记录" })).toBeTruthy();
-    expect(enableButton.disabled).toBe(false);
+    await waitFor(() => expect(setStartupEnabled).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "后台记录" })).toBeNull();
+    expect(screen.getByRole("listbox", { name: "剪贴板历史" })).toBeTruthy();
 
-    fireEvent.click(enableButton);
+    const startupToggle = screen.getByRole<HTMLInputElement>("checkbox", { name: "开机自启" });
+    expect(startupToggle.checked).toBe(false);
+    fireEvent.click(startupToggle);
     await waitFor(() => {
       expect(setStartupEnabled).toHaveBeenCalledTimes(2);
-      expect(screen.queryByRole("dialog", { name: "后台记录" })).toBeNull();
+      expect(startupToggle.checked).toBe(true);
     });
   });
 
