@@ -353,6 +353,25 @@ describe("App", () => {
     });
   });
 
+  test("saves the configured maximum text length from advanced settings", async () => {
+    const updateSettings = vi.fn<ClipboardHistoryApi["updateSettings"]>()
+      .mockResolvedValue({ ...DEFAULT_SETTINGS, maxTextLength: 3_000_000 });
+    window.clipHistory = mockClipHistory({ updateSettings });
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId("advanced-settings-button"));
+    fireEvent.change(screen.getByTestId("max-text-length-input"), {
+      target: { value: "3000000" }
+    });
+    fireEvent.click(screen.getByTestId("save-advanced-settings-button"));
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        maxTextLength: 3_000_000
+      }));
+    });
+  });
+
   test.each([
     {
       name: "startup errors override paused and fallback states",

@@ -36,6 +36,26 @@ const migrationCases: MigrationCase[] = [
 ];
 
 describe("migrateSettings", () => {
+  test("upgrades the previous default text limit for existing installations", () => {
+    const migrated = migrateSettings({
+      maxTextLength: 20_000,
+      launchAtStartup: false,
+      startupDecisionVersion: 1
+    }, oldEvidence());
+
+    expect(migrated.maxTextLength).toBe(1_000_000);
+  });
+
+  test("preserves an existing custom text limit", () => {
+    const migrated = migrateSettings({
+      maxTextLength: 80_000,
+      launchAtStartup: false,
+      startupDecisionVersion: 1
+    }, oldEvidence());
+
+    expect(migrated.maxTextLength).toBe(80_000);
+  });
+
   test.each(migrationCases)(
     "migrates %s",
     (_name, raw, evidence, launchAtStartup, startupDecisionVersion) => {

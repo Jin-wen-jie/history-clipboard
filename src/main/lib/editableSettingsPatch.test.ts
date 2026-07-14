@@ -51,6 +51,13 @@ describe("sanitizeEditableSettingsPatch", () => {
     })).toEqual({});
   });
 
+  test("caps text limits at the supported maximum", () => {
+    expect(sanitizeEditableSettingsPatch({ maxTextLength: 5_000_000 })).toEqual({
+      maxTextLength: 5_000_000
+    });
+    expect(sanitizeEditableSettingsPatch({ maxTextLength: 5_000_001 })).toEqual({});
+  });
+
   test("requires a real boolean for the dedicated startup IPC", () => {
     expect(() => requireBoolean("false", "startup enabled")).toThrow("startup enabled");
     expect(() => requireBoolean(undefined, "startup enabled")).toThrow("startup enabled");

@@ -1,4 +1,4 @@
-import type { EditableSettingsPatch } from "../../shared/types";
+import { MAX_TEXT_LENGTH, type EditableSettingsPatch } from "../../shared/types";
 
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 
@@ -33,7 +33,7 @@ export function sanitizeEditableSettingsPatch(value: unknown): EditableSettingsP
   if (isIntegerInRange(input.retentionDays, 1, 365)) {
     patch.retentionDays = input.retentionDays;
   }
-  if (isIntegerInRange(input.maxTextLength, 1, Number.MAX_SAFE_INTEGER)) {
+  if (isIntegerInRange(input.maxTextLength, 1, MAX_TEXT_LENGTH)) {
     patch.maxTextLength = input.maxTextLength;
   }
   if (isIntegerInRange(input.maxImageBytes, 1024 * 1024, MAX_IMAGE_BYTES)) {

@@ -7,6 +7,7 @@ import type {
   StartupState,
   StorageStats
 } from "../../shared/types";
+import { DEFAULT_SETTINGS, MAX_TEXT_LENGTH } from "../../shared/types";
 import { formatBytes } from "../../shared/format";
 
 type SettingsPaneProps = {
@@ -39,6 +40,7 @@ export function SettingsPane({
   const [editing, setEditing] = useState(false);
   const [editRetentionDays, setEditRetentionDays] = useState(30);
   const [editMaxItems, setEditMaxItems] = useState(500);
+  const [editMaxTextLength, setEditMaxTextLength] = useState(DEFAULT_SETTINGS.maxTextLength);
   const [editMaxImageBytes, setEditMaxImageBytes] = useState(10);
   const [editHotkey, setEditHotkey] = useState("Ctrl+Alt+V");
   const captureStatus = getCaptureStatus(settings, startupState, backgroundState);
@@ -49,6 +51,7 @@ export function SettingsPane({
   function startEditing(): void {
     setEditRetentionDays(settings?.retentionDays ?? 30);
     setEditMaxItems(settings?.maxItems ?? 500);
+    setEditMaxTextLength(settings?.maxTextLength ?? DEFAULT_SETTINGS.maxTextLength);
     setEditMaxImageBytes((settings?.maxImageBytes ?? 10 * 1024 * 1024) / (1024 * 1024));
     setEditHotkey(settings?.hotkey ?? "Ctrl+Alt+V");
     setEditing(true);
@@ -58,6 +61,7 @@ export function SettingsPane({
     onSaveSettings({
       retentionDays: editRetentionDays,
       maxItems: editMaxItems,
+      maxTextLength: editMaxTextLength,
       maxImageBytes: editMaxImageBytes * 1024 * 1024,
       hotkey: editHotkey
     });
@@ -162,7 +166,7 @@ export function SettingsPane({
 
       <div className="limits">
         <IconCheck size={16} />
-        <span>最近 {settings?.retentionDays ?? 30} 天 · 最多 {settings?.maxItems ?? 500} 条 · 单图 {formatBytes(settings?.maxImageBytes ?? 0)}</span>
+        <span>最近 {settings?.retentionDays ?? 30} 天 · 最多 {settings?.maxItems ?? 500} 条 · 单条文本 {(settings?.maxTextLength ?? DEFAULT_SETTINGS.maxTextLength).toLocaleString("zh-CN")} 字符 · 单图 {formatBytes(settings?.maxImageBytes ?? 0)}</span>
       </div>
 
       <hr className="settings-divider" />
@@ -190,6 +194,18 @@ export function SettingsPane({
             />
           </label>
           <label className="edit-field">
+            <span>最大文本长度（字符）</span>
+            <input
+              data-testid="max-text-length-input"
+              type="number"
+              min={1}
+              max={MAX_TEXT_LENGTH}
+              step={10_000}
+              value={editMaxTextLength}
+              onChange={(e) => setEditMaxTextLength(Number(e.target.value))}
+            />
+          </label>
+          <label className="edit-field">
             <span>单图上限</span>
             <select value={editMaxImageBytes} onChange={(e) => setEditMaxImageBytes(Number(e.target.value))}>
               <option value={1}>1 MB</option>
@@ -208,14 +224,14 @@ export function SettingsPane({
             <button className="edit-cancel" type="button" onClick={() => setEditing(false)}>
               取消
             </button>
-            <button className="edit-save" type="button" onClick={saveSettings}>
+            <button data-testid="save-advanced-settings-button" className="edit-save" type="button" onClick={saveSettings}>
               <IconSave size={16} />
               <span>保存设置</span>
             </button>
           </div>
         </div>
       ) : (
-        <button className="edit-button" type="button" onClick={startEditing}>
+        <button data-testid="advanced-settings-button" className="edit-button" type="button" onClick={startEditing}>
           修改高级设置
         </button>
       )}

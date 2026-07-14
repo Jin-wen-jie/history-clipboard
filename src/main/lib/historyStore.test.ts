@@ -161,6 +161,7 @@ describe("HistoryStore settings migration", () => {
       maxItems: 250,
       retentionDays: 14,
       maxTextLength: 12_000,
+      textLimitMigrationVersion: 1,
       maxImageBytes: 2 * 1024 * 1024,
       hotkey: "Ctrl+Shift+V",
       launchAtStartup: false,

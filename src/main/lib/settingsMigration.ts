@@ -4,6 +4,9 @@ import {
   type AppSettings
 } from "../../shared/types";
 
+const PREVIOUS_DEFAULT_MAX_TEXT_LENGTH = 20_000;
+const TEXT_LIMIT_MIGRATION_VERSION = 1;
+
 export type InstallationEvidence = {
   settingsExists: boolean;
   settingsCorrupt: boolean;
@@ -17,6 +20,7 @@ export function migrateSettings(
   evidence: InstallationEvidence
 ): AppSettings {
   const migrated = compatibleSettings(raw);
+  migrateTextLimit(migrated, raw);
   const hasExistingEvidence = evidence.settingsExists
     || evidence.historyExists
     || evidence.vaultKeyExists
@@ -73,6 +77,17 @@ function compatibleSettings(raw: Partial<AppSettings> | undefined): AppSettings 
   }
 
   return settings;
+}
+
+function migrateTextLimit(settings: AppSettings, raw: Partial<AppSettings> | undefined): void {
+  if (raw?.textLimitMigrationVersion === TEXT_LIMIT_MIGRATION_VERSION) {
+    return;
+  }
+
+  if (settings.maxTextLength === PREVIOUS_DEFAULT_MAX_TEXT_LENGTH) {
+    settings.maxTextLength = DEFAULT_SETTINGS.maxTextLength;
+  }
+  settings.textLimitMigrationVersion = TEXT_LIMIT_MIGRATION_VERSION;
 }
 
 function isFiniteNumber(value: unknown): value is number {

@@ -66,6 +66,7 @@ export type AppSettings = {
   maxItems: number;
   retentionDays: number;
   maxTextLength: number;
+  textLimitMigrationVersion?: number;
   maxImageBytes: number;
   hotkey: string;
   launchAtStartup: boolean;
@@ -74,7 +75,7 @@ export type AppSettings = {
 };
 
 export type EditableSettingsPatch = Partial<
-  Omit<AppSettings, "launchAtStartup" | "startupDecisionVersion">
+  Omit<AppSettings, "launchAtStartup" | "startupDecisionVersion" | "textLimitMigrationVersion">
 >;
 
 export type StorageStats = {
@@ -110,11 +111,15 @@ export type ClipboardHistoryApi = {
   importHistory(): Promise<{ ok: boolean; reason?: string; imported?: number; skipped?: number }>;
 };
 
+export const DEFAULT_MAX_TEXT_LENGTH = 1_000_000;
+export const MAX_TEXT_LENGTH = 5_000_000;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   captureEnabled: true,
   maxItems: 500,
   retentionDays: 30,
-  maxTextLength: 20_000,
+  maxTextLength: DEFAULT_MAX_TEXT_LENGTH,
+  textLimitMigrationVersion: 1,
   maxImageBytes: 10 * 1024 * 1024,
   hotkey: "Ctrl+Alt+V",
   launchAtStartup: true,
