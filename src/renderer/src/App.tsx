@@ -1,6 +1,7 @@
 import { useClipboardHistory } from "./useClipboardHistory";
 import { HistoryPane } from "./HistoryPane";
 import { SettingsPane } from "./SettingsPane";
+import { StartupPrompt } from "./StartupPrompt";
 import { ToastContainer, useToasts } from "./Toast";
 
 export function App() {
@@ -8,6 +9,10 @@ export function App() {
     items,
     settings,
     stats,
+    startupState,
+    backgroundState,
+    startupActionPending,
+    startupActionError,
     filterType,
     search,
     dateFrom,
@@ -25,7 +30,8 @@ export function App() {
     deleteItem,
     deleteItems,
     togglePinned,
-    updateSettings,
+    setStartupEnabled,
+    updateEditableSettings,
     clearCurrent,
     load,
   } = useClipboardHistory();
@@ -49,7 +55,7 @@ export function App() {
         onDateFromChange={setDateFrom}
         onDateToChange={setDateTo}
         onClearDateFilter={clearDateFilter}
-        onRefresh={() => void load()}
+        onRefresh={() => void load(true)}
         onCopy={copyItem}
         onTogglePin={togglePinned}
         onDelete={deleteItem}
@@ -60,13 +66,19 @@ export function App() {
       <SettingsPane
         settings={settings}
         stats={stats}
+        startupState={startupState}
+        backgroundState={backgroundState}
+        startupActionPending={startupActionPending}
         imageBytes={imageBytes}
-        onToggleCapture={() => void updateSettings({ captureEnabled: !settings?.captureEnabled })}
-        onToggleLaunchAtStartup={(event) => void updateSettings({ launchAtStartup: event.target.checked })}
+        onToggleCapture={() => void updateEditableSettings({ captureEnabled: !settings?.captureEnabled })}
+        onToggleLaunchAtStartup={(enabled) => void setStartupEnabled(enabled)}
         onClear={() => void clearCurrent()}
-        onSaveSettings={(patch) => void updateSettings(patch)}
+        onSaveSettings={(patch) => void updateEditableSettings(patch)}
         addToast={addToast}
       />
+      {(startupState?.pendingDecision === true || startupActionError !== null) && (
+        <StartupPrompt error={startupActionError} onChoose={setStartupEnabled} />
+      )}
       <ToastContainer toasts={toasts} onRemove={removeToast} />
     </main>
   );

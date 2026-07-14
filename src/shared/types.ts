@@ -73,6 +73,10 @@ export type AppSettings = {
   sensitiveFilterEnabled: boolean;
 };
 
+export type EditableSettingsPatch = Partial<
+  Omit<AppSettings, "launchAtStartup" | "startupDecisionVersion">
+>;
+
 export type StorageStats = {
   totalItems: number;
   textItems: number;
@@ -96,8 +100,11 @@ export type ClipboardHistoryApi = {
   clear(type?: HistoryFilterType): Promise<void>;
   setPinned(id: string, pinned: boolean): Promise<{ ok: boolean }>;
   getSettings(): Promise<AppSettings>;
-  updateSettings(settings: Partial<AppSettings>): Promise<AppSettings>;
+  updateSettings(settings: EditableSettingsPatch): Promise<AppSettings>;
   getStats(): Promise<StorageStats>;
+  getStartupState(): Promise<StartupState>;
+  setStartupEnabled(enabled: boolean): Promise<StartupState>;
+  getBackgroundState(): Promise<ClipboardBackgroundState>;
   showWindow(): Promise<void>;
   exportHistory(): Promise<{ ok: boolean; reason?: string }>;
   importHistory(): Promise<{ ok: boolean; reason?: string; imported?: number; skipped?: number }>;

@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppSettings, HistoryFilterType, HistoryItem, StorageStats } from "../../shared/types";
+import type {
+  AppSettings,
+  ClipboardBackgroundState,
+  EditableSettingsPatch,
+  HistoryFilterType,
+  HistoryItem,
+  StartupState,
+  StorageStats
+} from "../../shared/types";
 import { formatBytes } from "../../shared/format";
 
 export type LoadState = "idle" | "loading" | "error";
+
+const STARTUP_ACTION_ERROR = "启动设置失败";
 
 /** Convert YYYY-MM-DD to an ISO start-of-day string (or undefined if empty) */
 function dateToFrom(dateStr: string): string | undefined {
@@ -20,6 +30,10 @@ export function useClipboardHistory() {
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [settings, setSettings] = useState<AppSettings | undefined>();
   const [stats, setStats] = useState<StorageStats | undefined>();
+  const [startupState, setStartupState] = useState<StartupState | undefined>();
+  const [backgroundState, setBackgroundState] = useState<ClipboardBackgroundState | undefined>();
+  const [startupActionPending, setStartupActionPending] = useState(false);
+  const [startupActionError, setStartupActionError] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<HistoryFilterType>("all");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -29,6 +43,12 @@ export function useClipboardHistory() {
   const [lastAction, setLastAction] = useState("");
   const historyListRef = useRef<HTMLElement | null>(null);
   const latestItemIdRef = useRef<string | undefined>(undefined);
+  const loadGenerationRef = useRef(0);
+  const activeLoadRef = useRef<Promise<void> | null>(null);
+  const queuedLoadRef = useRef(false);
+  const loadRef = useRef<(queueIfBusy?: boolean) => Promise<void>>(async () => undefined);
+  const startupWriteVersionRef = useRef(0);
+  const startupActionPendingRef = useRef(false);
 
   // Debounce search: avoid reloading data on every keystroke
   useEffect(() => {
@@ -36,13 +56,48 @@ export function useClipboardHistory() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  const load = useCallback(async () => {
-    setLoadState("loading");
-    try {
-      if (!window.clipHistory) {
-        throw new Error("桌面桥接未加载，请重新安装或重启应用");
+  const load = useCallback((queueIfBusy = false): Promise<void> => {
+    const activeLoad = activeLoadRef.current;
+    if (activeLoad) {
+      if (queueIfBusy) {
+        queuedLoadRef.current = true;
+        loadGenerationRef.current += 1;
       }
+      return activeLoad;
+    }
 
+    const loadGeneration = ++loadGenerationRef.current;
+    const startupWriteVersion = startupWriteVersionRef.current;
+    const loadTask = (async (): Promise<void> => {
+    setLoadState("loading");
+    if (!window.clipHistory) {
+      setLastAction("桌面桥接未加载，请重新安装或重启应用");
+      setLoadState("error");
+      return;
+    }
+
+    const startupRequest = Promise.resolve()
+      .then(() => window.clipHistory.getStartupState())
+      .then((nextStartupState) => {
+        if (
+          loadGeneration === loadGenerationRef.current &&
+          startupWriteVersion === startupWriteVersionRef.current &&
+          !startupActionPendingRef.current
+        ) {
+          setStartupState(nextStartupState);
+        }
+      })
+      .catch(() => undefined);
+    const backgroundRequest = Promise.resolve()
+      .then(() => window.clipHistory.getBackgroundState())
+      .then((nextBackgroundState) => {
+        if (loadGeneration === loadGenerationRef.current) {
+          setBackgroundState(nextBackgroundState);
+        }
+      })
+      .catch(() => undefined);
+
+    try {
       const [nextSettings, nextStats, nextItems] = await Promise.all([
         window.clipHistory.getSettings(),
         window.clipHistory.getStats(),
@@ -53,6 +108,9 @@ export function useClipboardHistory() {
           to: dateToTo(dateTo)
         })
       ]);
+      if (loadGeneration !== loadGenerationRef.current) {
+        return;
+      }
       const nextLatestItemId = nextItems[0]?.id;
       const previousLatestItemId = latestItemIdRef.current;
       setSettings(nextSettings);
@@ -63,19 +121,42 @@ export function useClipboardHistory() {
         historyListRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       }
       setLoadState("idle");
-      setLastAction("");
     } catch (error) {
-      setLastAction(error instanceof Error ? error.message : String(error));
-      setLoadState("error");
+      if (loadGeneration === loadGenerationRef.current) {
+        setLastAction(error instanceof Error ? error.message : String(error));
+        setLoadState("error");
+      }
+    } finally {
+      void startupRequest;
+      void backgroundRequest;
     }
+    })();
+
+    activeLoadRef.current = loadTask;
+    void loadTask.finally(() => {
+      if (activeLoadRef.current !== loadTask) {
+        return;
+      }
+
+      activeLoadRef.current = null;
+      if (queuedLoadRef.current) {
+        queuedLoadRef.current = false;
+        void loadRef.current();
+      }
+    });
+    return loadTask;
   }, [filterType, debouncedSearch, dateFrom, dateTo]);
+  loadRef.current = load;
 
   useEffect(() => {
-    void load();
+    void load(true);
     const interval = window.setInterval(() => {
       void load();
     }, 1500);
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+      loadGenerationRef.current += 1;
+    };
   }, [load]);
 
   const imageBytes = useMemo(() => formatBytes(stats?.imageBytes ?? 0), [stats]);
@@ -125,12 +206,40 @@ export function useClipboardHistory() {
     }
   }
 
-  async function updateSettings(patch: Partial<AppSettings>): Promise<void> {
+  async function updateEditableSettings(patch: EditableSettingsPatch): Promise<void> {
     try {
       setSettings(await window.clipHistory.updateSettings(patch));
-      await load();
+      await load(true);
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "设置更新失败");
+    }
+  }
+
+  async function setStartupEnabled(enabled: boolean): Promise<void> {
+    if (startupActionPendingRef.current) {
+      return;
+    }
+
+    startupActionPendingRef.current = true;
+    startupWriteVersionRef.current += 1;
+    setStartupActionPending(true);
+    try {
+      const nextStartupState = await window.clipHistory.setStartupEnabled(enabled);
+      setStartupState(nextStartupState);
+      if (nextStartupState.error) {
+        setStartupActionError(STARTUP_ACTION_ERROR);
+        setLastAction(STARTUP_ACTION_ERROR);
+      } else {
+        setStartupActionError(null);
+        setLastAction("");
+      }
+    } catch {
+      setStartupActionError(STARTUP_ACTION_ERROR);
+      setLastAction(STARTUP_ACTION_ERROR);
+    } finally {
+      startupWriteVersionRef.current += 1;
+      startupActionPendingRef.current = false;
+      setStartupActionPending(false);
     }
   }
 
@@ -138,7 +247,7 @@ export function useClipboardHistory() {
     try {
       await window.clipHistory.clear(filterType);
       setLastAction("已清空");
-      await load();
+      await load(true);
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "清空失败");
     }
@@ -154,6 +263,10 @@ export function useClipboardHistory() {
     items,
     settings,
     stats,
+    startupState,
+    backgroundState,
+    startupActionPending,
+    startupActionError,
     filterType,
     search,
     dateFrom,
@@ -173,7 +286,8 @@ export function useClipboardHistory() {
     deleteItem,
     deleteItems,
     togglePinned,
-    updateSettings,
+    setStartupEnabled,
+    updateEditableSettings,
     clearCurrent,
     load,
   };

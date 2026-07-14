@@ -1,22 +1,34 @@
 import { IconCheck, IconPause, IconPlay, IconSave, IconSettings, IconTrash2 } from "./icons";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AppSettings, StorageStats } from "../../shared/types";
+import type {
+  AppSettings,
+  ClipboardBackgroundState,
+  EditableSettingsPatch,
+  StartupState,
+  StorageStats
+} from "../../shared/types";
 import { formatBytes } from "../../shared/format";
 
 type SettingsPaneProps = {
   settings: AppSettings | undefined;
   stats: StorageStats | undefined;
+  startupState: StartupState | undefined;
+  backgroundState: ClipboardBackgroundState | undefined;
+  startupActionPending: boolean;
   imageBytes: string;
   onToggleCapture: () => void;
-  onToggleLaunchAtStartup: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onToggleLaunchAtStartup: (enabled: boolean) => void;
   onClear: () => void;
-  onSaveSettings: (patch: Partial<AppSettings>) => void;
+  onSaveSettings: (patch: EditableSettingsPatch) => void;
   addToast: (text: string, type?: "success" | "error" | "info") => void;
 };
 
 export function SettingsPane({
   settings,
   stats,
+  startupState,
+  backgroundState,
+  startupActionPending,
   imageBytes,
   onToggleCapture,
   onToggleLaunchAtStartup,
@@ -29,6 +41,10 @@ export function SettingsPane({
   const [editMaxItems, setEditMaxItems] = useState(500);
   const [editMaxImageBytes, setEditMaxImageBytes] = useState(10);
   const [editHotkey, setEditHotkey] = useState("Ctrl+Alt+V");
+  const captureStatus = getCaptureStatus(settings, startupState, backgroundState);
+  const startupEnabled = startupState?.error
+    ? startupState.actualEnabled ?? false
+    : startupState?.desiredEnabled ?? false;
 
   function startEditing(): void {
     setEditRetentionDays(settings?.retentionDays ?? 30);
@@ -64,12 +80,38 @@ export function SettingsPane({
         <span>{settings?.captureEnabled ? "暂停记录" : "恢复记录"}</span>
       </button>
 
+      <div
+        className={`capture-status${captureStatus ? ` ${captureStatus.tone}` : ""}`}
+        data-testid="capture-status"
+        role="status"
+        aria-label="后台记录状态"
+        aria-live="polite"
+      >
+        {captureStatus && (
+          <>
+            <span className="capture-status-dot" aria-hidden="true" />
+            <span>{captureStatus.label}</span>
+          </>
+        )}
+      </div>
+
       <label className="switch-row">
         <span>开机自启</span>
         <input
           type="checkbox"
-          checked={settings?.launchAtStartup ?? false}
-          onChange={onToggleLaunchAtStartup}
+          checked={startupEnabled}
+          disabled={!startupState || startupActionPending}
+          onChange={(event) => onToggleLaunchAtStartup(event.target.checked)}
+        />
+      </label>
+
+      <label className="switch-row">
+        <span>敏感内容过滤</span>
+        <input
+          type="checkbox"
+          checked={settings?.sensitiveFilterEnabled ?? false}
+          disabled={!settings}
+          onChange={(event) => onSaveSettings({ sensitiveFilterEnabled: event.target.checked })}
         />
       </label>
 
@@ -179,6 +221,31 @@ export function SettingsPane({
       )}
     </aside>
   );
+}
+
+type CaptureStatus = {
+  label: "启动项异常" | "已暂停" | "轮询降级" | "正常监听";
+  tone: "error" | "warning" | "success";
+};
+
+function getCaptureStatus(
+  settings: AppSettings | undefined,
+  startupState: StartupState | undefined,
+  backgroundState: ClipboardBackgroundState | undefined
+): CaptureStatus | undefined {
+  if (startupState?.error) {
+    return { label: "启动项异常", tone: "error" };
+  }
+  if (settings?.captureEnabled === false) {
+    return { label: "已暂停", tone: "warning" };
+  }
+  if (backgroundState?.mode === "fallback" || backgroundState?.mode === "starting") {
+    return { label: "轮询降级", tone: "warning" };
+  }
+  if (backgroundState?.mode === "listening") {
+    return { label: "正常监听", tone: "success" };
+  }
+  return undefined;
 }
 
 // ── Hotkey Recorder ──

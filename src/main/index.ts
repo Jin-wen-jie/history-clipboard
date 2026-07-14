@@ -8,6 +8,7 @@ import {
   ClipboardRuntime,
   shouldReconcileAfterSettingsChange
 } from "./lib/clipboardRuntime";
+import { requireBoolean, sanitizeEditableSettingsPatch } from "./lib/editableSettingsPatch";
 import { HistoryStore, type ImageInput } from "./lib/historyStore";
 import { SafeStorageKeyProvider } from "./lib/secureVault";
 import { ShutdownCoordinator } from "./lib/shutdownCoordinator";
@@ -270,17 +271,13 @@ function registerIpc(): void {
       return DEFAULT_SETTINGS;
     }
   });
-  ipcMain.handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
+  ipcMain.handle("settings:update", async (_event, value: unknown) => {
     try {
-      const { launchAtStartup, ...ordinaryPatch } = patch;
+      const patch = sanitizeEditableSettingsPatch(value);
       const before = await store.getSettings();
       let settings = before;
-      if (Object.keys(ordinaryPatch).length > 0) {
-        settings = await store.updateSettings(ordinaryPatch);
-      }
-      if (typeof launchAtStartup === "boolean") {
-        await startupManager.setEnabled(launchAtStartup);
-        settings = await store.getSettings();
+      if (Object.keys(patch).length > 0) {
+        settings = await store.updateSettings(patch);
       }
       if (shouldReconcileAfterSettingsChange(before, settings)) {
         await runtime?.reconcileAfterSettingsChange();
@@ -292,6 +289,16 @@ function registerIpc(): void {
       console.error("settings:update error:", error);
       return await store.getSettings();
     }
+  });
+  ipcMain.handle("startup:getState", async () => startupManager.getState());
+  ipcMain.handle("startup:setEnabled", async (_event, value: unknown) => (
+    startupManager.setEnabled(requireBoolean(value, "startup enabled"))
+  ));
+  ipcMain.handle("background:getState", async () => {
+    if (!runtime) {
+      throw new Error("Clipboard runtime unavailable");
+    }
+    return runtime.getState();
   });
   ipcMain.handle("stats:get", async () => {
     try {
