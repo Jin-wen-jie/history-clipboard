@@ -17,7 +17,9 @@ import {
   StartupManager,
   isLaunchAtLogin
 } from "./lib/startupManager";
-import { autoUpdater } from "electron-updater";
+import updaterModule from "electron-updater";
+
+const { autoUpdater } = updaterModule;
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
