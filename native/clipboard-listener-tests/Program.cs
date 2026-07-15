@@ -30,6 +30,7 @@ internal static class Program
             Run("bounded-png-output-stream", BoundsEveryOutputGrowthPath);
             Run("gdiplus-swallowed-png-limit", RejectsPngWhenGdiPlusSwallowsStreamLimit);
             Run("capture-wide-memory-budget", RejectsCombinedCaptureBeforeAllocations);
+            Run("file-snapshot-payload", BuildsFileSnapshotPayload);
             Run("capture-oom-error-mapping", MapsCaptureOutOfMemoryToTooLarge);
             Run("candidate-preconversion-cleanup", CleansAllCandidatesWhenPreconversionFails);
             Run("candidate-best-effort-cleanup", ContinuesAfterCandidateDisposeFailure);
@@ -493,6 +494,36 @@ internal static class Program
         AssertEqual(
             "internal",
             ClipboardSnapshotReader.GetCaptureErrorCode(new InvalidOperationException()));
+    }
+
+    private static void BuildsFileSnapshotPayload()
+    {
+        List<ClipboardFileInfo> files = new List<ClipboardFileInfo>();
+        files.Add(new ClipboardFileInfo(@"C:\work\data.json", 128));
+        ClipboardSnapshotResult result = ClipboardSnapshotResult.Success(
+            1,
+            1,
+            false,
+            false,
+            null,
+            null,
+            0,
+            0,
+            files,
+            TestTimestamp,
+            null);
+
+        AgentFrame frame;
+        string errorCode;
+        AssertTrue(SnapshotFrameBuilder.TryBuild(result, out frame, out errorCode));
+        AssertEqual(null, errorCode);
+        AssertTrue(frame.Files != null);
+        string json = Encoding.UTF8.GetString(
+            frame.PayloadBytes,
+            frame.Files.Offset,
+            frame.Files.Length);
+        AssertTrue(json.Contains(@"C:\\work\\data.json"));
+        AssertTrue(json.Contains("\"byteSize\":128"));
     }
 
     private static void CleansAllCandidatesWhenPreconversionFails()

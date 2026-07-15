@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   DEFAULT_SETTINGS,
@@ -58,13 +58,14 @@ function mockClipHistory(overrides?: Partial<ClipboardHistoryApi>): ClipboardHis
   return {
     list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([]),
     copy: vi.fn<ClipboardHistoryApi["copy"]>().mockResolvedValue({ ok: true }),
+    preview: vi.fn<ClipboardHistoryApi["preview"]>().mockResolvedValue({ ok: false, reason: "unsupported" }),
     delete: vi.fn<ClipboardHistoryApi["delete"]>().mockResolvedValue({ ok: true }),
     deleteMany: vi.fn<ClipboardHistoryApi["deleteMany"]>().mockResolvedValue({ ok: true, count: 0 }),
     clear: vi.fn<ClipboardHistoryApi["clear"]>().mockResolvedValue(),
     setPinned: vi.fn<ClipboardHistoryApi["setPinned"]>().mockResolvedValue({ ok: true }),
     getSettings: vi.fn<ClipboardHistoryApi["getSettings"]>().mockResolvedValue(DEFAULT_SETTINGS),
     updateSettings: vi.fn<ClipboardHistoryApi["updateSettings"]>().mockResolvedValue(DEFAULT_SETTINGS),
-    getStats: vi.fn<ClipboardHistoryApi["getStats"]>().mockResolvedValue({ totalItems: 0, textItems: 0, imageItems: 0, imageBytes: 0 }),
+    getStats: vi.fn<ClipboardHistoryApi["getStats"]>().mockResolvedValue({ totalItems: 0, textItems: 0, imageItems: 0, fileItems: 0, imageBytes: 0 }),
     getStartupState: vi.fn<ClipboardHistoryApi["getStartupState"]>().mockResolvedValue(DEFAULT_STARTUP_STATE),
     setStartupEnabled: vi.fn<ClipboardHistoryApi["setStartupEnabled"]>().mockResolvedValue(DEFAULT_STARTUP_STATE),
     getBackgroundState: vi.fn<ClipboardHistoryApi["getBackgroundState"]>().mockResolvedValue(DEFAULT_BACKGROUND_STATE),
@@ -132,6 +133,160 @@ describe("App", () => {
       expect(screen.getByText("new clipboard")).toBeTruthy();
       expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
     });
+  });
+
+  test("opens a full text preview and adjusts its font size", async () => {
+    const item = {
+      id: "preview-text",
+      type: "text" as const,
+      text: "第一行\n第二行完整内容",
+      createdAt: "2026-07-14T10:00:00.000Z",
+      updatedAt: "2026-07-14T10:00:00.000Z",
+      pinned: false,
+      copyCount: 1
+    };
+    window.clipHistory = mockClipHistory({
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([item])
+    });
+    const { container } = render(<App />);
+    await screen.findByText(/第一行/);
+
+    fireEvent.click(screen.getByTitle("查看内容"));
+
+    expect(screen.getByRole("dialog", { name: "文本内容预览" })).toBeTruthy();
+    const preview = container.querySelector(".content-preview-text") as HTMLElement;
+    expect(preview.textContent).toBe(item.text);
+    expect(preview.style.fontSize).toBe("16px");
+    fireEvent.click(screen.getByTitle("放大字号"));
+    expect(preview.style.fontSize).toBe("18px");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "文本内容预览" })).toBeNull();
+  });
+
+  test("loads long clipboard text in bounded chunks", async () => {
+    const text = "长".repeat(100_001);
+    window.clipHistory = mockClipHistory({
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([{
+        id: "long-text",
+        type: "text",
+        text,
+        createdAt: "2026-07-14T10:00:00.000Z",
+        updatedAt: "2026-07-14T10:00:00.000Z",
+        pinned: false,
+        copyCount: 1
+      }])
+    });
+    const { container } = render(<App />);
+    await screen.findByTitle("查看内容");
+
+    fireEvent.click(screen.getByTitle("查看内容"));
+
+    const preview = container.querySelector(".content-preview-text") as HTMLElement;
+    expect(preview.textContent).toHaveLength(100_000);
+    fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
+    expect(preview.textContent).toHaveLength(100_001);
+  });
+
+  test("replaces the thumbnail with original image data in preview", async () => {
+    const preview = vi.fn<ClipboardHistoryApi["preview"]>().mockResolvedValue({
+      ok: true,
+      type: "image",
+      png: Uint8Array.from([137, 80, 78, 71])
+    });
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:original-image") });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    try {
+      window.clipHistory = mockClipHistory({
+        preview,
+        list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([{
+          id: "image-preview",
+          type: "image",
+          thumbnailDataUrl: "data:image/png;base64,dGh1bWI=",
+          width: 1920,
+          height: 1080,
+          byteSize: 4,
+          createdAt: "2026-07-14T10:00:00.000Z",
+          updatedAt: "2026-07-14T10:00:00.000Z",
+          pinned: false,
+          copyCount: 1
+        }])
+      });
+      render(<App />);
+      await screen.findByTitle("查看内容");
+
+      fireEvent.click(screen.getByTitle("查看内容"));
+
+      const image = await screen.findByAltText("剪贴板图片") as HTMLImageElement;
+      await waitFor(() => expect(image.src).toContain("blob:original-image"));
+      expect(preview).toHaveBeenCalledWith("image-preview");
+      fireEvent.click(screen.getByRole("button", { name: "关闭预览" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "图片预览" })).toBeNull());
+    } finally {
+      if (originalCreateObjectURL) Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectURL });
+      else delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+      if (originalRevokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectURL });
+      else delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    }
+  });
+
+  test("shows the complete path in a file preview", async () => {
+    const item = {
+      id: "preview-file",
+      type: "file" as const,
+      path: "C:\\work\\reports\\data.json",
+      name: "data.json",
+      extension: "json",
+      byteSize: 128,
+      missing: false,
+      createdAt: "2026-07-14T10:00:00.000Z",
+      updatedAt: "2026-07-14T10:00:00.000Z",
+      pinned: false,
+      copyCount: 1
+    };
+    window.clipHistory = mockClipHistory({
+      preview: vi.fn<ClipboardHistoryApi["preview"]>().mockResolvedValue({
+        ok: true,
+        type: "file-text",
+        text: "{\n  \"enabled\": true\n}",
+        formatted: true
+      }),
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([item])
+    });
+    render(<App />);
+    await screen.findByText("data.json");
+
+    fireEvent.doubleClick(screen.getByText("data.json"));
+
+    const dialog = screen.getByRole("dialog", { name: "文件信息预览" });
+    expect(dialog).toBeTruthy();
+    expect(within(dialog).getByText(item.path)).toBeTruthy();
+    await waitFor(() => {
+      expect(dialog.querySelector(".content-preview-text")?.textContent).toContain('"enabled": true');
+    });
+  });
+
+  test("marks a missing file in the history list", async () => {
+    window.clipHistory = mockClipHistory({
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([{
+        id: "missing-file",
+        type: "file",
+        path: "C:\\missing\\notes.txt",
+        name: "notes.txt",
+        extension: "txt",
+        byteSize: 10,
+        missing: true,
+        createdAt: "2026-07-14T10:00:00.000Z",
+        updatedAt: "2026-07-14T10:00:00.000Z",
+        pinned: false,
+        copyCount: 1
+      }])
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("原文件不存在")).toBeTruthy();
   });
 
   test("renders a slow initial load after a polling interval elapses", async () => {

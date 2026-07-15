@@ -124,6 +124,28 @@ describe("ClipboardAgentFrameParser", () => {
     }]);
   });
 
+  test("parses copied file metadata from a snapshot payload", () => {
+    const files = Buffer.from(JSON.stringify([
+      { path: "C:\\work\\notes.txt", byteSize: 42 },
+      { path: "C:\\work\\data.json", byteSize: 128 }
+    ]), "utf8");
+    const parser = new ClipboardAgentFrameParser();
+
+    expect(parser.push(encodeFrame(snapshotHeader({
+      files: { offset: 0, length: files.length }
+    }), files))).toEqual([{
+      version: 1,
+      type: "snapshot",
+      sequence: 12,
+      capturedAt: 1_783_828_800_000,
+      text: "",
+      files: [
+        { path: "C:\\work\\notes.txt", byteSize: 42 },
+        { path: "C:\\work\\data.json", byteSize: 128 }
+      ]
+    }]);
+  });
+
   test("parses a frame pushed one byte at a time", () => {
     const header: AgentFrameHeader = {
       version: 1,

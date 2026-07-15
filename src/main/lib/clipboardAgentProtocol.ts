@@ -19,6 +19,7 @@ export type AgentFrameHeader =
       capturedAt: number;
       text?: { offset: number; length: number };
       png?: { offset: number; length: number; width: number; height: number };
+      files?: { offset: number; length: number };
     }
   | {
       version: 1;
@@ -46,6 +47,7 @@ export type NativeClipboardSnapshot = {
   png?: Buffer;
   width?: number;
   height?: number;
+  files?: Array<{ path: string; byteSize: number }>;
 };
 
 export type AgentControlFrame = Extract<
@@ -59,6 +61,7 @@ type JsonObject = Record<string, unknown>;
 type SnapshotHeader = Extract<AgentFrameHeader, { type: "snapshot" }>;
 type TextSegment = NonNullable<SnapshotHeader["text"]>;
 type PngSegment = NonNullable<SnapshotHeader["png"]>;
+type FilesSegment = NonNullable<SnapshotHeader["files"]>;
 
 const GAP_REASONS = new Set(["sequence-advanced", "overflow", "clipboard-busy"]);
 const ERROR_CODES = new Set(["too-large", "clipboard-busy", "listener-failed", "internal"]);
@@ -145,6 +148,30 @@ function validatePngSegment(value: unknown): PngSegment {
   };
 }
 
+function validateFilesPayload(bytes: Buffer): Array<{ path: string; byteSize: number }> {
+  let value: unknown;
+  try {
+    value = JSON.parse(decodeUtf8(bytes)) as unknown;
+  } catch {
+    throw new Error("Invalid files payload");
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length > 100 ||
+    !value.every((file) => (
+      isObject(file) &&
+      hasOnlyKeys(file, ["path", "byteSize"]) &&
+      typeof file.path === "string" &&
+      file.path.length > 0 &&
+      file.path.length <= 32_768 &&
+      isNonNegativeSafeInteger(file.byteSize)
+    ))
+  ) {
+    throw new Error("Invalid files payload");
+  }
+  return value as Array<{ path: string; byteSize: number }>;
+}
+
 function validateHeader(value: unknown): AgentFrameHeader {
   if (!isObject(value) || value.version !== 1 || typeof value.type !== "string") {
     return invalidHeader();
@@ -174,7 +201,7 @@ function validateHeader(value: unknown): AgentFrameHeader {
 
     case "snapshot": {
       if (
-        !hasOnlyKeys(value, ["version", "type", "sequence", "capturedAt", "text", "png"]) ||
+        !hasOnlyKeys(value, ["version", "type", "sequence", "capturedAt", "text", "png", "files"]) ||
         !isUint32(value.sequence) ||
         !isTimestamp(value.capturedAt)
       ) {
@@ -191,6 +218,9 @@ function validateHeader(value: unknown): AgentFrameHeader {
       }
       if (Object.hasOwn(value, "png")) {
         header.png = validatePngSegment(value.png);
+      }
+      if (Object.hasOwn(value, "files")) {
+        header.files = validateTextSegment(value.files);
       }
       return header;
     }
@@ -267,6 +297,7 @@ function parseFrame(header: AgentFrameHeader, payload: Buffer): AgentFrame {
   const segments: Array<{ offset: number; length: number }> = [];
   if (header.text) segments.push(header.text);
   if (header.png) segments.push(header.png);
+  if (header.files) segments.push(header.files);
   for (const segment of segments) {
     if (segment.offset > payload.length || segment.length > payload.length - segment.offset) {
       throw new Error("Invalid frame payload");
@@ -298,6 +329,11 @@ function parseFrame(header: AgentFrameHeader, payload: Buffer): AgentFrame {
     snapshot.png = Buffer.from(payload.subarray(header.png.offset, header.png.offset + header.png.length));
     snapshot.width = header.png.width;
     snapshot.height = header.png.height;
+  }
+  if (header.files) {
+    snapshot.files = validateFilesPayload(
+      payload.subarray(header.files.offset, header.files.offset + header.files.length)
+    );
   }
   return snapshot;
 }

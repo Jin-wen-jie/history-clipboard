@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { access, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { hashBytes } from "../../shared/hash";
 import { DEFAULT_SETTINGS, type AppSettings, type ClipboardContent, type HistoryFilterType, type HistoryItem, type HistoryQuery, type HistoryResult, type HistoryType, type StorageStats } from "../../shared/types";
@@ -21,6 +21,11 @@ export type ImageInput = {
   height: number;
 };
 
+export type FileInput = {
+  path: string;
+  byteSize: number;
+};
+
 export class HistoryStore {
   private readonly settingsPath: string;
   private readonly contentDir: string;
@@ -38,6 +43,7 @@ export class HistoryStore {
   private cacheDirty = false;
   /** Ids that have been invalidated since last cache rebuild */
   private invalidatedIds = new Set<string>();
+  private lastFileAvailabilityCheckAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly rootDir: string,
@@ -102,6 +108,7 @@ export class HistoryStore {
       // Partial update: re-decrypt only invalidated items
       await this.partialRebuildCache();
     }
+    await this.refreshFileAvailability();
 
     const visibleItems: HistoryItem[] = [];
     const unreadableIds: string[] = [];
@@ -121,6 +128,7 @@ export class HistoryStore {
       if (to !== undefined && updatedAt > to) continue;
       if (search && publicItem.type === "text" && !publicItem.text.toLocaleLowerCase().includes(search)) continue;
       if (search && publicItem.type === "image") continue;
+      if (search && publicItem.type === "file" && !`${publicItem.name}\n${publicItem.path}`.toLocaleLowerCase().includes(search)) continue;
 
       visibleItems.push(publicItem);
     }
@@ -150,6 +158,37 @@ export class HistoryStore {
 
   async addImage(input: ImageInput): Promise<HistoryResult> {
     return this.enqueueMutation(() => this.addImageInternal(input));
+  }
+
+  async addFile(input: FileInput): Promise<HistoryResult> {
+    return this.enqueueMutation(() => this.addFileInternal(input));
+  }
+
+  private async addFileInternal(input: FileInput): Promise<HistoryResult> {
+    if (!input.path.trim()) {
+      return { ok: false, reason: "blank" };
+    }
+    const path = resolve(input.path);
+    if (!Number.isSafeInteger(input.byteSize) || input.byteSize < 0) {
+      return { ok: false, reason: "blank" };
+    }
+
+    const hash = hashBytes("file", Buffer.from(path.toLocaleLowerCase(), "utf8"));
+    const content = Buffer.from(JSON.stringify({ path }), "utf8");
+    return this.upsertItem(hash, "file",
+      (id) => ({
+        id, type: "file" as const, hash,
+        contentKey: `${id}.file`,
+        byteSize: input.byteSize,
+        createdAt: this.now(),
+        updatedAt: this.now(),
+        pinned: false,
+        copyCount: 1
+      }),
+      async (item) => {
+        await this.vault.write(item.contentKey, content);
+      }
+    );
   }
 
   private async addImageInternal(input: ImageInput): Promise<HistoryResult> {
@@ -255,6 +294,11 @@ export class HistoryStore {
       return { type: "text", text: (await this.vault.read(item.contentKey)).toString("utf8") };
     }
 
+    if (item.type === "file") {
+      const content = JSON.parse((await this.vault.read(item.contentKey)).toString("utf8")) as { path?: unknown };
+      return typeof content.path === "string" ? { type: "file", path: content.path } : undefined;
+    }
+
     return { type: "image", png: await this.vault.read(item.contentKey) };
   }
 
@@ -283,6 +327,7 @@ export class HistoryStore {
       totalItems: this.items.length,
       textItems: this.items.filter((item) => item.type === "text").length,
       imageItems: imageItems.length,
+      fileItems: this.items.filter((item) => item.type === "file").length,
       imageBytes: imageItems.reduce((total, item) => total + item.byteSize, 0)
     };
   }
@@ -323,7 +368,7 @@ export class HistoryStore {
         const result = await this.addTextInternal(item.text);
         if (result.ok) imported++;
         else skipped++;
-      } else if (item.type === "image") {
+      } else if (item.type === "image" || item.type === "file") {
         skipped++;
       }
     }
@@ -457,6 +502,26 @@ export class HistoryStore {
       };
     }
 
+    if (item.type === "file") {
+      const content = JSON.parse((await this.vault.read(item.contentKey)).toString("utf8")) as { path?: unknown };
+      if (typeof content.path !== "string" || content.path.length === 0) {
+        throw new Error("Invalid file history content");
+      }
+      return {
+        id: item.id,
+        type: "file",
+        path: content.path,
+        name: basename(content.path),
+        extension: extname(content.path).slice(1).toLocaleLowerCase(),
+        byteSize: item.byteSize,
+        missing: false,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        pinned: item.pinned,
+        copyCount: item.copyCount
+      };
+    }
+
     const thumbnail = await this.vault.read(item.thumbnailKey);
     return {
       id: item.id,
@@ -501,6 +566,26 @@ export class HistoryStore {
 
     await this.commitRemoval(removed);
     return true;
+  }
+
+  private async refreshFileAvailability(): Promise<void> {
+    const now = (this.options.now?.() ?? new Date()).getTime();
+    if (now - this.lastFileAvailabilityCheckAt < 10_000) {
+      return;
+    }
+    this.lastFileAvailabilityCheckAt = now;
+    const files = Array.from(this.itemCache.values()).filter(
+      (item): item is Extract<HistoryItem, { type: "file" }> => item.type === "file"
+    );
+    const batchSize = 16;
+    for (let start = 0; start < files.length; start += batchSize) {
+      await Promise.all(files.slice(start, start + batchSize).map(async (item) => {
+        const missing = !(await isFile(item.path));
+        if (item.missing !== missing) {
+          this.itemCache.set(item.id, { ...item, missing });
+        }
+      }));
+    }
   }
 
   private retentionItemsToRemove(items: readonly StoredItem[]): StoredItem[] {
@@ -686,6 +771,14 @@ async function directoryExists(path: string): Promise<boolean> {
       return false;
     }
     throw error;
+  }
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
   }
 }
 

@@ -1,9 +1,9 @@
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, Tray } from "electron";
-import { existsSync, readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryQuery } from "../shared/types";
+import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryPreviewResult, type HistoryQuery } from "../shared/types";
 import {
   ClipboardRuntime,
   shouldReconcileAfterSettingsChange
@@ -20,6 +20,12 @@ import {
 import updaterModule from "electron-updater";
 
 const { autoUpdater } = updaterModule;
+
+const MAX_FILE_PREVIEW_BYTES = 2 * 1024 * 1024;
+const TEXT_PREVIEW_EXTENSIONS = new Set([
+  ".txt", ".json", ".md", ".log", ".csv", ".xml", ".yaml", ".yml",
+  ".ini", ".conf", ".js", ".jsx", ".ts", ".tsx", ".css", ".html"
+]);
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
@@ -112,7 +118,8 @@ async function bootstrap(): Promise<void> {
       readText: () => clipboard.readText(),
       readImage: readClipboardImage,
       addText: (text) => store.addText(text),
-      addImage: (image) => store.addImage(image)
+      addImage: (image) => store.addImage(image),
+      addFile: (file) => store.addFile(file)
     },
     createImageInput
   });
@@ -273,6 +280,14 @@ function registerIpc(): void {
       return DEFAULT_SETTINGS;
     }
   });
+  ipcMain.handle("history:preview", async (_event, id: string) => {
+    try {
+      return await previewHistoryItem(id);
+    } catch (error) {
+      console.error("history:preview error:", error);
+      return { ok: false, reason: "missing" } satisfies HistoryPreviewResult;
+    }
+  });
   ipcMain.handle("settings:update", async (_event, value: unknown) => {
     try {
       const patch = sanitizeEditableSettingsPatch(value);
@@ -307,7 +322,7 @@ function registerIpc(): void {
       return store.getStats();
     } catch (error) {
       console.error("stats:get error:", error);
-      return { totalItems: 0, textItems: 0, imageItems: 0, imageBytes: 0 };
+      return { totalItems: 0, textItems: 0, imageItems: 0, fileItems: 0, imageBytes: 0 };
     }
   });
   ipcMain.handle("window:show", async () => {
@@ -353,7 +368,7 @@ function registerIpc(): void {
   });
 }
 
-async function copyHistoryItem(id: string): Promise<{ ok: boolean }> {
+async function copyHistoryItem(id: string): Promise<{ ok: boolean; reason?: "missing" }> {
   const content = await store.getContent(id);
   if (!content) {
     return { ok: false };
@@ -361,8 +376,17 @@ async function copyHistoryItem(id: string): Promise<{ ok: boolean }> {
 
   if (content.type === "text") {
     clipboard.writeText(content.text);
-  } else {
+  } else if (content.type === "image") {
     clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(content.png)));
+  } else {
+    try {
+      if (!statSync(content.path).isFile()) {
+        return { ok: false, reason: "missing" };
+      }
+    } catch {
+      return { ok: false, reason: "missing" };
+    }
+    clipboard.writeBuffer("FileNameW", Buffer.from(`${content.path}\0`, "utf16le"));
   }
 
   return { ok: true };
@@ -389,6 +413,55 @@ function readClipboardImage(): ImageInput | undefined {
 
   const size = image.getSize();
   return createImageInput(png, size.width, size.height);
+}
+
+async function previewHistoryItem(id: string): Promise<HistoryPreviewResult> {
+  const content = await store.getContent(id);
+  if (!content) {
+    return { ok: false, reason: "missing" };
+  }
+  if (content.type === "image") {
+    return { ok: true, type: "image", png: content.png };
+  }
+  if (content.type !== "file") {
+    return { ok: false, reason: "unsupported" };
+  }
+
+  const extension = extname(content.path).toLocaleLowerCase();
+  if (!TEXT_PREVIEW_EXTENSIONS.has(extension)) {
+    return { ok: false, reason: "unsupported" };
+  }
+  let fileStat;
+  try {
+    fileStat = await stat(content.path);
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+  if (!fileStat.isFile()) {
+    return { ok: false, reason: "missing" };
+  }
+  if (fileStat.size > MAX_FILE_PREVIEW_BYTES) {
+    return { ok: false, reason: "too-large" };
+  }
+
+  const bytes = await readFile(content.path);
+  if (bytes.byteLength > MAX_FILE_PREVIEW_BYTES) {
+    return { ok: false, reason: "too-large" };
+  }
+  const rawText = bytes.toString("utf8");
+  if (extension === ".json") {
+    try {
+      return {
+        ok: true,
+        type: "file-text",
+        text: JSON.stringify(JSON.parse(rawText) as unknown, null, 2),
+        formatted: true
+      };
+    } catch {
+      // Invalid JSON remains viewable as raw text.
+    }
+  }
+  return { ok: true, type: "file-text", text: rawText, formatted: false };
 }
 
 function createImageInput(png: Buffer, width: number, height: number): ImageInput {

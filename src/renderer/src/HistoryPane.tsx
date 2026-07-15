@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { IconClipboard, IconCopy, IconPin, IconPinOff, IconRefreshCw, IconSearch, IconTrash2 } from "./icons";
+import { IconClipboard, IconCopy, IconEye, IconPin, IconPinOff, IconRefreshCw, IconSearch, IconTrash2 } from "./icons";
 import type { HistoryFilterType, HistoryItem } from "../../shared/types";
 import { HistoryRow } from "./HistoryRow";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
-import { ImagePreview } from "./ImagePreview";
+import { ContentPreview } from "./ImagePreview";
 import type { LoadState } from "./useClipboardHistory";
 
 type HistoryPaneProps = {
@@ -33,6 +33,7 @@ type HistoryPaneProps = {
 function labelForType(type: HistoryFilterType): string {
   if (type === "text") return "文本";
   if (type === "image") return "图片";
+  if (type === "file") return "文件";
   return "全部";
 }
 
@@ -172,8 +173,8 @@ export function HistoryPane({
   }
 
   function handleDoubleClick(id: string) {
-    onCopyItem(id);
-    onAddToast("已复制到剪贴板", "success");
+    const item = items.find((candidate) => candidate.id === id);
+    if (item) setPreviewItem(item);
   }
 
   // Context menu handlers
@@ -190,6 +191,12 @@ export function HistoryPane({
     if (ctxMenu?.item) {
       onCopyItem(ctxMenu.item.id);
       onAddToast("已复制到剪贴板", "success");
+    }
+  }
+
+  function ctxPreview() {
+    if (ctxMenu?.item) {
+      setPreviewItem(ctxMenu.item);
     }
   }
 
@@ -214,7 +221,8 @@ export function HistoryPane({
   }
 
   const contextMenuItems: ContextMenuItem[] = ctxMenu?.item
-    ? [
+      ? [
+        { label: "查看内容", icon: <IconEye size={15} />, onClick: ctxPreview },
         { label: "复制", icon: <IconCopy size={15} />, onClick: ctxCopy },
         { label: ctxMenu.item.pinned ? "取消置顶" : "置顶", icon: ctxMenu.item.pinned ? <IconPinOff size={15} /> : <IconPin size={15} />, onClick: ctxTogglePin },
         { label: "---" },
@@ -247,7 +255,7 @@ export function HistoryPane({
           />
         </label>
         <div className="segments" role="tablist" aria-label="筛选类型">
-          {(["all", "text", "image"] as HistoryFilterType[]).map((type) => (
+          {(["all", "text", "image", "file"] as HistoryFilterType[]).map((type) => (
             <button
               key={type}
               className={filterType === type ? "active" : ""}
@@ -298,7 +306,7 @@ export function HistoryPane({
 
       {/* Search hint */}
       {hasSearchQuery && (
-        <div className="search-hint">搜索仅支持文本内容，图片已被过滤</div>
+        <div className="search-hint">搜索支持文本、文件名和路径，图片已被过滤</div>
       )}
 
       {/* Batch actions */}
@@ -360,6 +368,7 @@ export function HistoryPane({
               onDoubleClick={handleDoubleClick}
               onContextMenu={handleContextMenu}
               onImageClick={handleImageClick}
+              onPreview={setPreviewItem}
             />
           ))
         )}
@@ -375,13 +384,10 @@ export function HistoryPane({
         />
       )}
 
-      {/* Image preview modal */}
-      {previewItem && previewItem.type === "image" && (
-        <ImagePreview
-          src={previewItem.thumbnailDataUrl}
-          width={previewItem.width}
-          height={previewItem.height}
-          byteSize={previewItem.byteSize}
+      {/* Content preview modal */}
+      {previewItem && (
+        <ContentPreview
+          item={previewItem}
           onClose={() => setPreviewItem(null)}
         />
       )}

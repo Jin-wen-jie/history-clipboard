@@ -24,6 +24,7 @@ namespace HistoryClipboard.ClipboardListener
         internal const uint CF_BITMAP = 2;
         internal const uint CF_DIB = 8;
         internal const uint CF_UNICODETEXT = 13;
+        internal const uint CF_HDROP = 15;
         internal const uint CF_DIBV5 = 17;
 
         internal static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
@@ -92,5 +93,13 @@ namespace HistoryClipboard.ClipboardListener
             IntPtr graphicsObject,
             int bufferSize,
             out BitmapObject bitmapObject);
+
+        [DllImport("shell32.dll", EntryPoint = "DragQueryFileW", CharSet = CharSet.Unicode,
+            ExactSpelling = true, CallingConvention = CallingConvention.Winapi)]
+        internal static extern uint DragQueryFile(
+            IntPtr dropHandle,
+            uint fileIndex,
+            [Out] System.Text.StringBuilder fileName,
+            uint fileNameSize);
     }
 }

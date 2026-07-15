@@ -79,6 +79,30 @@ describe("ClipboardWatcher", () => {
     expect(addText).toHaveBeenCalledWith("plain text");
   });
 
+  test("records every file from a native file-copy snapshot", async () => {
+    const addFile = vi.fn().mockResolvedValue({ ok: true });
+    const addText = vi.fn();
+    const watcher = new ClipboardWatcher({
+      getSettings: async () => DEFAULT_SETTINGS,
+      readText: () => "",
+      readImage: () => undefined,
+      addText,
+      addImage: vi.fn(),
+      addFile
+    });
+    const files = [
+      { path: "C:\\work\\notes.txt", byteSize: 42 },
+      { path: "C:\\work\\data.json", byteSize: 128 }
+    ];
+
+    await watcher.captureNative({ text: "", files });
+
+    expect(addFile).toHaveBeenCalledTimes(2);
+    expect(addFile).toHaveBeenNthCalledWith(1, files[0]);
+    expect(addFile).toHaveBeenNthCalledWith(2, files[1]);
+    expect(addText).not.toHaveBeenCalled();
+  });
+
   test("native snapshots are persisted without hash deduplication", async () => {
     const addText = vi.fn().mockResolvedValue({ ok: true });
     const watcher = new ClipboardWatcher({

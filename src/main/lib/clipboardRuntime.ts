@@ -173,7 +173,10 @@ export class ClipboardRuntime {
   }
 
   private async captureNative(snapshot: NativeClipboardSnapshot): Promise<void> {
-    const capture: ClipboardSnapshot = { text: snapshot.text ?? "" };
+    const capture: ClipboardSnapshot = {
+      text: snapshot.text ?? "",
+      files: snapshot.files
+    };
     if (
       snapshot.png &&
       snapshot.width !== undefined &&

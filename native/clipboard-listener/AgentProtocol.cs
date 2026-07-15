@@ -79,6 +79,7 @@ namespace HistoryClipboard.ClipboardListener
         public long CapturedAt { get; private set; }
         public AgentTextSegment Text { get; private set; }
         public AgentPngSegment Png { get; private set; }
+        public AgentTextSegment Files { get; private set; }
         public string Reason { get; private set; }
         public uint? FromSequence { get; private set; }
         public uint ToSequence { get; private set; }
@@ -142,7 +143,18 @@ namespace HistoryClipboard.ClipboardListener
             AgentTextSegment text,
             AgentPngSegment png)
         {
-            return CreateSnapshot(sequence, capturedAt, payload, text, png, true);
+            return CreateSnapshot(sequence, capturedAt, payload, text, png, null, true);
+        }
+
+        public static AgentFrame Snapshot(
+            uint sequence,
+            long capturedAt,
+            byte[] payload,
+            AgentTextSegment text,
+            AgentPngSegment png,
+            AgentTextSegment files)
+        {
+            return CreateSnapshot(sequence, capturedAt, payload, text, png, files, true);
         }
 
         internal static AgentFrame SnapshotOwned(
@@ -152,7 +164,18 @@ namespace HistoryClipboard.ClipboardListener
             AgentTextSegment text,
             AgentPngSegment png)
         {
-            return CreateSnapshot(sequence, capturedAt, payload, text, png, false);
+            return CreateSnapshot(sequence, capturedAt, payload, text, png, null, false);
+        }
+
+        internal static AgentFrame SnapshotOwned(
+            uint sequence,
+            long capturedAt,
+            byte[] payload,
+            AgentTextSegment text,
+            AgentPngSegment png,
+            AgentTextSegment files)
+        {
+            return CreateSnapshot(sequence, capturedAt, payload, text, png, files, false);
         }
 
         private static AgentFrame CreateSnapshot(
@@ -161,6 +184,7 @@ namespace HistoryClipboard.ClipboardListener
             byte[] payload,
             AgentTextSegment text,
             AgentPngSegment png,
+            AgentTextSegment files,
             bool copyPayload)
         {
             if (payload == null)
@@ -168,8 +192,9 @@ namespace HistoryClipboard.ClipboardListener
                 throw new ArgumentNullException("payload");
             }
             AgentProtocol.ValidateTimestamp(capturedAt, "capturedAt");
-            ValidatePayloadLayout(payload.Length, text, png);
+            ValidatePayloadLayout(payload.Length, text, png, files);
             ValidateTextEncoding(payload, text);
+            ValidateTextEncoding(payload, files);
 
             AgentFrame frame = new AgentFrame("snapshot");
             frame.HasSequence = true;
@@ -178,6 +203,7 @@ namespace HistoryClipboard.ClipboardListener
             frame.PayloadBytes = copyPayload ? CopyPayload(payload) : payload;
             frame.Text = text;
             frame.Png = png;
+            frame.Files = files;
             return frame;
         }
 
@@ -231,36 +257,38 @@ namespace HistoryClipboard.ClipboardListener
         private static void ValidatePayloadLayout(
             int payloadLength,
             AgentTextSegment text,
-            AgentPngSegment png)
+            AgentPngSegment png,
+            AgentTextSegment files)
         {
-            if (text == null && png == null)
+            List<KeyValuePair<int, int>> segments = new List<KeyValuePair<int, int>>();
+            if (text != null)
             {
-                if (payloadLength != 0)
+                segments.Add(new KeyValuePair<int, int>(text.Offset, text.Length));
+            }
+            if (png != null)
+            {
+                segments.Add(new KeyValuePair<int, int>(png.Offset, png.Length));
+            }
+            if (files != null)
+            {
+                segments.Add(new KeyValuePair<int, int>(files.Offset, files.Length));
+            }
+            segments.Sort(delegate(KeyValuePair<int, int> left, KeyValuePair<int, int> right)
+            {
+                return left.Key.CompareTo(right.Key);
+            });
+            int offset = 0;
+            foreach (KeyValuePair<int, int> segment in segments)
+            {
+                if (segment.Key != offset)
                 {
-                    throw new ArgumentException("Payload must be fully declared.", "payload");
+                    throw new ArgumentException("Payload segments must be contiguous.", "payload");
                 }
-                return;
+                offset = CheckedSegmentEnd(segment.Key, segment.Value);
             }
-
-            if (text != null && png == null)
+            if (offset != payloadLength)
             {
-                ValidateSingleSegment(text.Offset, text.Length, payloadLength);
-                return;
-            }
-
-            if (text == null)
-            {
-                ValidateSingleSegment(png.Offset, png.Length, payloadLength);
-                return;
-            }
-
-            int textEnd = CheckedSegmentEnd(text.Offset, text.Length);
-            int pngEnd = CheckedSegmentEnd(png.Offset, png.Length);
-            bool textFirst = text.Offset == 0 && textEnd == png.Offset && pngEnd == payloadLength;
-            bool pngFirst = png.Offset == 0 && pngEnd == text.Offset && textEnd == payloadLength;
-            if (!textFirst && !pngFirst)
-            {
-                throw new ArgumentException("Payload segments must be contiguous.", "payload");
+                throw new ArgumentException("Payload must be fully declared.", "payload");
             }
         }
 
@@ -439,6 +467,13 @@ namespace HistoryClipboard.ClipboardListener
                     png.Add("width", frame.Png.Width);
                     png.Add("height", frame.Png.Height);
                     header.Add("png", png);
+                }
+                if (frame.Files != null)
+                {
+                    Dictionary<string, object> files = new Dictionary<string, object>();
+                    files.Add("offset", frame.Files.Offset);
+                    files.Add("length", frame.Files.Length);
+                    header.Add("files", files);
                 }
             }
             else if (frame.Type == "gap")

@@ -24,7 +24,13 @@ export type StoredImageItem = StoredBase & {
   byteSize: number;
 };
 
-export type StoredItem = StoredTextItem | StoredImageItem;
+export type StoredFileItem = StoredBase & {
+  type: "file";
+  contentKey: string;
+  byteSize: number;
+};
+
+export type StoredItem = StoredTextItem | StoredImageItem | StoredFileItem;
 
 export type MetadataFile = {
   version: 1;
@@ -202,6 +208,10 @@ function isStoredItem(value: unknown): value is StoredItem {
 
   if (value.type === "text") {
     return true;
+  }
+
+  if (value.type === "file") {
+    return isNonNegativeInteger(value.byteSize);
   }
 
   return value.type === "image"

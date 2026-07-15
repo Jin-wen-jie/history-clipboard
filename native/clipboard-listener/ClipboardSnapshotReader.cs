@@ -7,6 +7,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Web.Script.Serialization;
 
 namespace HistoryClipboard.ClipboardListener
 {
@@ -27,6 +28,7 @@ namespace HistoryClipboard.ClipboardListener
         internal int PngHeight { get; private set; }
         internal long CapturedAt { get; private set; }
         internal string ErrorCode { get; private set; }
+        internal IList<ClipboardFileInfo> Files { get; private set; }
 
         internal static ClipboardSnapshotResult Busy(
             uint beforeSequence,
@@ -53,6 +55,23 @@ namespace HistoryClipboard.ClipboardListener
             long capturedAt,
             string errorCode)
         {
+            return Success(beforeSequence, sequence, sequenceAdvanced, hasText, text,
+                pngBytes, pngWidth, pngHeight, null, capturedAt, errorCode);
+        }
+
+        internal static ClipboardSnapshotResult Success(
+            uint beforeSequence,
+            uint sequence,
+            bool sequenceAdvanced,
+            bool hasText,
+            string text,
+            byte[] pngBytes,
+            int pngWidth,
+            int pngHeight,
+            IList<ClipboardFileInfo> files,
+            long capturedAt,
+            string errorCode)
+        {
             ClipboardSnapshotResult result = new ClipboardSnapshotResult();
             result.BeforeSequence = beforeSequence;
             result.Sequence = sequence;
@@ -62,10 +81,23 @@ namespace HistoryClipboard.ClipboardListener
             result.PngBytes = pngBytes;
             result.PngWidth = pngWidth;
             result.PngHeight = pngHeight;
+            result.Files = files;
             result.CapturedAt = capturedAt;
             result.ErrorCode = errorCode;
             return result;
         }
+    }
+
+    internal sealed class ClipboardFileInfo
+    {
+        internal ClipboardFileInfo(string filePath, long fileByteSize)
+        {
+            path = filePath;
+            byteSize = fileByteSize;
+        }
+
+        public string path { get; private set; }
+        public long byteSize { get; private set; }
     }
 
     internal enum CapturedImageCandidateKind
@@ -609,7 +641,11 @@ namespace HistoryClipboard.ClipboardListener
                     ? StrictUtf8.GetByteCount(result.Text)
                     : 0;
                 int pngLength = result.PngBytes == null ? 0 : result.PngBytes.Length;
-                int payloadLength = checked(textLength + pngLength);
+                byte[] filesBytes = result.Files == null || result.Files.Count == 0
+                    ? null
+                    : StrictUtf8.GetBytes(new JavaScriptSerializer().Serialize(result.Files));
+                int filesLength = filesBytes == null ? 0 : filesBytes.Length;
+                int payloadLength = checked(textLength + pngLength + filesLength);
                 if (payloadLength > AgentProtocol.MaxSnapshotPayloadLength)
                 {
                     errorCode = "too-large";
@@ -622,7 +658,7 @@ namespace HistoryClipboard.ClipboardListener
                 if (!SnapshotMemoryBudget.Fits(
                     maxWorkingBytes,
                     textBytes,
-                    pngLength,
+                    checked((long)pngLength + filesLength),
                     payloadLength))
                 {
                     errorCode = "too-large";
@@ -653,6 +689,10 @@ namespace HistoryClipboard.ClipboardListener
                 {
                     Buffer.BlockCopy(result.PngBytes, 0, payload, textLength, pngLength);
                 }
+                if (filesLength > 0)
+                {
+                    Buffer.BlockCopy(filesBytes, 0, payload, textLength + pngLength, filesLength);
+                }
 
                 AgentTextSegment textSegment = result.HasText
                     ? new AgentTextSegment(0, textLength)
@@ -664,12 +704,16 @@ namespace HistoryClipboard.ClipboardListener
                         pngLength,
                         result.PngWidth,
                         result.PngHeight);
+                AgentTextSegment filesSegment = filesBytes == null
+                    ? null
+                    : new AgentTextSegment(textLength + pngLength, filesLength);
                 frame = AgentFrame.SnapshotOwned(
                     result.Sequence,
                     result.CapturedAt,
                     payload,
                     textSegment,
-                    pngSegment);
+                    pngSegment,
+                    filesSegment);
                 AgentProtocol.GetFrameLength(frame);
                 return true;
             }
@@ -738,6 +782,7 @@ namespace HistoryClipboard.ClipboardListener
             uint after = observed;
             long capturedAt = 0;
             string errorCode = null;
+            IList<ClipboardFileInfo> files = null;
 
             try
             {
@@ -753,6 +798,7 @@ namespace HistoryClipboard.ClipboardListener
                                 out unicodeBytes,
                                 ref errorCode);
                             ReadImageCandidates(rawBudget, imageCandidates);
+                            files = ReadFiles();
                             after = NativeMethods.GetClipboardSequenceNumber();
                             capturedAt = AgentFrame.CurrentUnixMilliseconds();
                             if (after != before)
@@ -812,6 +858,7 @@ namespace HistoryClipboard.ClipboardListener
                             image.PngBytes,
                             image.Width,
                             image.Height,
+                            files,
                             capturedAt,
                             errorCode);
                     });
@@ -937,6 +984,54 @@ namespace HistoryClipboard.ClipboardListener
             }
 
             MergeError(ref errorCode, status == CopyStatus.TooLarge ? "too-large" : "internal");
+        }
+
+        private static IList<ClipboardFileInfo> ReadFiles()
+        {
+            if (!NativeMethods.IsClipboardFormatAvailable(NativeMethods.CF_HDROP))
+            {
+                return null;
+            }
+            IntPtr handle = NativeMethods.GetClipboardData(NativeMethods.CF_HDROP);
+            if (handle == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            uint count = Math.Min(NativeMethods.DragQueryFile(handle, 0xffffffff, null, 0), 100);
+            List<ClipboardFileInfo> files = new List<ClipboardFileInfo>();
+            int totalCharacters = 0;
+            for (uint index = 0; index < count; index++)
+            {
+                uint length = NativeMethods.DragQueryFile(handle, index, null, 0);
+                if (length == 0 || length > 32768)
+                {
+                    continue;
+                }
+                if (totalCharacters + length > 32768)
+                {
+                    break;
+                }
+                StringBuilder path = new StringBuilder(checked((int)length + 1));
+                if (NativeMethods.DragQueryFile(handle, index, path, (uint)path.Capacity) == 0)
+                {
+                    continue;
+                }
+                try
+                {
+                    FileInfo info = new FileInfo(path.ToString());
+                    if (info.Exists)
+                    {
+                        files.Add(new ClipboardFileInfo(info.FullName, info.Length));
+                        totalCharacters += checked((int)length);
+                    }
+                }
+                catch (Exception)
+                {
+                    // Ignore inaccessible entries and folders.
+                }
+            }
+            return files.Count == 0 ? null : files;
         }
 
         private void ReadImageCandidates(

@@ -59,6 +59,28 @@ export const IconImage = createIcon(
   </>
 );
 
+export const IconFile = createIcon(
+  <>
+    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z" />
+    <polyline points="14 2 14 8 20 8" />
+  </>
+);
+
+export const IconEye = createIcon(
+  <>
+    <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+    <circle cx="12" cy="12" r="3" />
+  </>
+);
+
+export const IconMinus = createIcon(<path d="M5 12h14" />);
+export const IconPlus = createIcon(
+  <>
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  </>
+);
+
 export const IconPin = createIcon(
   <>
     <path d="M12 17v5" />

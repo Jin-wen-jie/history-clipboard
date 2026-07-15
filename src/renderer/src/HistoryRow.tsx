@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconClipboard, IconCopy, IconImage, IconPin, IconPinOff, IconTrash2 } from "./icons";
+import { IconClipboard, IconCopy, IconEye, IconFile, IconImage, IconPin, IconPinOff, IconTrash2 } from "./icons";
 import type { HistoryItem } from "../../shared/types";
 import { formatBytes } from "../../shared/format";
 
@@ -15,6 +15,7 @@ type HistoryRowProps = {
   onDoubleClick: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, item: HistoryItem) => void;
   onImageClick: (item: HistoryItem) => void;
+  onPreview: (item: HistoryItem) => void;
 };
 
 function formatDate(value: string): string {
@@ -59,12 +60,14 @@ export function HistoryRow({
   onSelect,
   onDoubleClick,
   onContextMenu,
-  onImageClick
+  onImageClick,
+  onPreview
 }: HistoryRowProps) {
   const classNames = [
     "history-row",
     selected ? "selected" : "",
-    focused ? "focused" : ""
+    focused ? "focused" : "",
+    item.type === "file" && item.missing ? "file-missing" : ""
   ].filter(Boolean).join(" ");
 
   return (
@@ -84,12 +87,12 @@ export function HistoryRow({
         aria-label="选择条目"
       />
       <div className="row-kind">
-        {item.type === "image" ? <IconImage size={18} /> : <IconClipboard size={18} />}
+        {item.type === "image" ? <IconImage size={18} /> : item.type === "file" ? <IconFile size={18} /> : <IconClipboard size={18} />}
       </div>
       <div className="row-content">
         {item.type === "text" ? (
           <p className="text-preview">{highlightText(item.text, searchQuery)}</p>
-        ) : (
+        ) : item.type === "image" ? (
           <div className="image-preview">
             <img
               src={item.thumbnailDataUrl}
@@ -103,14 +106,26 @@ export function HistoryRow({
               {item.width} x {item.height} · {formatBytes(item.byteSize)}
             </span>
           </div>
+        ) : (
+          <div className="file-preview">
+            <p className="file-name">{highlightText(item.name, searchQuery)}</p>
+            <span className="file-info">
+              {item.extension ? item.extension.toUpperCase() : "文件"} · {formatBytes(item.byteSize)}
+            </span>
+            <span className="file-path" title={item.path}>{item.path}</span>
+          </div>
         )}
         <div className="row-meta">
           <span>{formatDate(item.updatedAt)}</span>
           <span>复制 {item.copyCount} 次</span>
           {item.pinned ? <span className="pin-label">置顶</span> : null}
+          {item.type === "file" && item.missing ? <span className="missing-label">原文件不存在</span> : null}
         </div>
       </div>
       <div className="row-actions">
+        <button className="icon-button" type="button" title="查看内容" onClick={() => onPreview(item)}>
+          <IconEye size={16} />
+        </button>
         <button className="icon-button" type="button" title="复制" onClick={() => onCopy(item.id)}>
           <IconCopy size={16} />
         </button>

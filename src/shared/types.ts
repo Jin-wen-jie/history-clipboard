@@ -1,4 +1,4 @@
-export type HistoryType = "text" | "image";
+export type HistoryType = "text" | "image" | "file";
 
 export type HistoryFilterType = "all" | HistoryType;
 
@@ -42,7 +42,21 @@ export type ImageHistoryItem = {
   copyCount: number;
 };
 
-export type HistoryItem = TextHistoryItem | ImageHistoryItem;
+export type FileHistoryItem = {
+  id: string;
+  type: "file";
+  path: string;
+  name: string;
+  extension: string;
+  byteSize: number;
+  missing: boolean;
+  createdAt: string;
+  updatedAt: string;
+  pinned: boolean;
+  copyCount: number;
+};
+
+export type HistoryItem = TextHistoryItem | ImageHistoryItem | FileHistoryItem;
 
 export type HistoryQuery = {
   search?: string;
@@ -82,6 +96,7 @@ export type StorageStats = {
   totalItems: number;
   textItems: number;
   imageItems: number;
+  fileItems: number;
   imageBytes: number;
 };
 
@@ -91,11 +106,18 @@ export type HistoryResult =
 
 export type ClipboardContent =
   | { type: "text"; text: string }
-  | { type: "image"; png: Uint8Array };
+  | { type: "image"; png: Uint8Array }
+  | { type: "file"; path: string };
+
+export type HistoryPreviewResult =
+  | { ok: true; type: "image"; png: Uint8Array }
+  | { ok: true; type: "file-text"; text: string; formatted: boolean }
+  | { ok: false; reason: "missing" | "unsupported" | "too-large" };
 
 export type ClipboardHistoryApi = {
   list(query?: HistoryQuery): Promise<HistoryItem[]>;
-  copy(id: string): Promise<{ ok: boolean }>;
+  copy(id: string): Promise<{ ok: boolean; reason?: "missing" }>;
+  preview(id: string): Promise<HistoryPreviewResult>;
   delete(id: string): Promise<{ ok: boolean }>;
   deleteMany(ids: string[]): Promise<{ ok: boolean; count: number }>;
   clear(type?: HistoryFilterType): Promise<void>;

@@ -164,7 +164,7 @@ export function useClipboardHistory() {
   async function copyItem(id: string): Promise<void> {
     try {
       const result = await window.clipHistory.copy(id);
-      setLastAction(result.ok ? "已复制" : "复制失败");
+      setLastAction(result.ok ? "已复制" : result.reason === "missing" ? "原文件已不存在" : "复制失败");
     } catch (error) {
       setLastAction(error instanceof Error ? error.message : "复制失败");
     }

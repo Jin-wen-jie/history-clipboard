@@ -1,6 +1,6 @@
 import { hashBytes } from "../../shared/hash";
 import type { AppSettings, HistoryResult } from "../../shared/types";
-import type { ImageInput } from "./historyStore";
+import type { FileInput, ImageInput } from "./historyStore";
 
 export type ClipboardWatcherOptions = {
   getSettings: () => Promise<AppSettings>;
@@ -8,6 +8,7 @@ export type ClipboardWatcherOptions = {
   readText: () => string;
   addImage: (input: ImageInput) => Promise<HistoryResult> | HistoryResult;
   addText: (text: string) => Promise<HistoryResult> | HistoryResult;
+  addFile?: (input: FileInput) => Promise<HistoryResult> | HistoryResult;
   fallbackIntervalMs?: number;
   highWaterItems?: number;
   lowWaterItems?: number;
@@ -20,6 +21,7 @@ export type ClipboardWatcherOptions = {
 
 export type ClipboardSnapshot = {
   image?: ImageInput;
+  files?: FileInput[];
   text: string;
 };
 
@@ -55,7 +57,11 @@ function snapshotBytes(snapshot: ClipboardSnapshot): number {
   const imageBytes = snapshot.image
     ? snapshot.image.png.byteLength + snapshot.image.thumbnailPng.byteLength
     : 0;
-  const bytes = Buffer.byteLength(snapshot.text, "utf8") + imageBytes;
+  const fileBytes = snapshot.files?.reduce(
+    (total, file) => total + Buffer.byteLength(file.path, "utf8") + 8,
+    0
+  ) ?? 0;
+  const bytes = Buffer.byteLength(snapshot.text, "utf8") + imageBytes + fileBytes;
   return Number.isFinite(bytes) && bytes >= 0 ? bytes : Number.MAX_SAFE_INTEGER;
 }
 
@@ -345,6 +351,15 @@ export class ClipboardWatcher {
     }
 
     const { snapshot } = item;
+
+    // ── Files ──
+    const files = snapshot.files ?? [];
+    for (const file of files) {
+      await this.options.addFile?.(file);
+    }
+    if (files.length > 0) {
+      return;
+    }
 
     // ── Image ──
     const image = snapshot.image;

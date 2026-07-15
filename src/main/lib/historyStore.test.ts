@@ -279,6 +279,35 @@ describe("HistoryStore", () => {
     expect(items[0]).toMatchObject({ type: "text", text: "alpha", copyCount: 2 });
   });
 
+  test("stores encrypted file references and deduplicates them by path", async () => {
+    const filePath = join(dir, "data.json");
+    await writeFile(filePath, Buffer.alloc(128));
+    await store.addFile({ path: filePath, byteSize: 128 });
+    await store.addFile({ path: filePath, byteSize: 128 });
+
+    const items = await store.list({ type: "file" });
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "file",
+      path: filePath,
+      name: "data.json",
+      extension: "json",
+      byteSize: 128,
+      missing: false,
+      copyCount: 2
+    });
+    await expect(store.getContent(items[0].id)).resolves.toEqual({
+      type: "file",
+      path: filePath
+    });
+    expect(store.getStats().fileItems).toBe(1);
+
+    await rm(filePath);
+    currentTime = new Date(currentTime.getTime() + 10_001);
+    await expect(store.list({ type: "file" })).resolves.toMatchObject([{ missing: true }]);
+  });
+
   test("persists metadata before addText resolves", async () => {
     vi.useFakeTimers();
     try {
