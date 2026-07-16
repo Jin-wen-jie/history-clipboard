@@ -117,6 +117,7 @@ export type HistoryPreviewResult =
 export type ClipboardHistoryApi = {
   list(query?: HistoryQuery): Promise<HistoryItem[]>;
   copy(id: string): Promise<{ ok: boolean; reason?: "missing" }>;
+  copyImagePath(id: string): Promise<{ ok: boolean; path?: string; reason?: "missing" | "not-image" | "write-failed" }>;
   preview(id: string): Promise<HistoryPreviewResult>;
   delete(id: string): Promise<{ ok: boolean }>;
   deleteMany(ids: string[]): Promise<{ ok: boolean; count: number }>;

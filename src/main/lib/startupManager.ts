@@ -123,12 +123,7 @@ export class StartupManager {
         path: this.executablePath,
         args: [LOGIN_ITEM_ARG]
       });
-      actualEnabled = systemSettings.launchItems.some((item) => {
-        return item.path === this.executablePath
-          && item.enabled === true
-          && item.args.length === 1
-          && item.args[0] === LOGIN_ITEM_ARG;
-      });
+      actualEnabled = systemSettings.openAtLogin;
     } catch {
       return this.createState(settings, null, true, "query-failed");
     }

@@ -147,18 +147,18 @@ export function SettingsPane({
         <span>清空当前筛选</span>
       </button>
 
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="backup-actions">
         <button className="wide-toggle" type="button" onClick={() => window.clipHistory?.exportHistory().then((r) => {
           if (r.ok) addToast("导出成功", "success");
           else if (r.reason !== "cancelled") addToast("导出失败", "error");
-        })} style={{ flex: 1, fontSize: 12 }}>
+        })}>
           <IconSave size={15} />
           <span>导出备份</span>
         </button>
         <button className="wide-toggle" type="button" onClick={() => window.clipHistory?.importHistory().then((r) => {
           if (r.ok) addToast(`导入完成：${r.imported} 条导入，${r.skipped} 条跳过`, "success");
           else if (r.reason !== "cancelled") addToast("导入失败", "error");
-        })} style={{ flex: 1, fontSize: 12 }}>
+        })}>
           <IconSave size={15} />
           <span>导入备份</span>
         </button>

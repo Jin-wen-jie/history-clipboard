@@ -17,3 +17,6 @@ desktop.ini
 build/clipboard-listener.exe
 build/clipboard-listener-tests.exe
 build/clipboard-listener-core.dll
+src-tauri/target/
+new
+old

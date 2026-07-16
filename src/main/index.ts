@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, Tray } from "electron";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryPreviewResult, type HistoryQuery } from "../shared/types";
@@ -22,6 +22,8 @@ import updaterModule from "electron-updater";
 const { autoUpdater } = updaterModule;
 
 const MAX_FILE_PREVIEW_BYTES = 2 * 1024 * 1024;
+const TRAY_ICON_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABR0lEQVR42mNhQAJqyW/i/zP8TwAyDYBYgIHagJHhAuN/xgm35oosRAiBbCt4L/D1y5/9DP/BFtMeAB3CzcPieGGC4AcmulsOAkC7wHYCAcv3L38S6Go5kiNUU98kMP3//z+fYaAA0G6W/wyMCgPnAAYDFoYBBqMOIMkBv95/YPj35y9eNUwszAxsggK0cQAhy4lVM7SiIMmNE4xBwCT+LVGGHukRAtPzdn0HY7xRRowD4JWVHBtBy5HVIOulShQsa5YfLQdGuAPOnz3JsG3zWrxqvP1CGAyMzGjjAENjczAejQJqBP1oFAwaBxCsCwhVJpTqZVRNfv1/QEOAkeH/xYGyHGQ3EyMj44IBa5UzMU1ghHRKX10A9g/06e37W3PFDMCJkIuX1YGeUQGyC2QnvHcMA6C+GuO/fwW0Cg2QxaBgvz1bBB7tAHA3eAuxmL6iAAAAAElFTkSuQmCC";
 const TEXT_PREVIEW_EXTENSIONS = new Set([
   ".txt", ".json", ".md", ".log", ".csv", ".xml", ".yaml", ".yml",
   ".ini", ".conf", ".js", ".jsx", ".ts", ".tsx", ".css", ".html"
@@ -280,6 +282,14 @@ function registerIpc(): void {
       return DEFAULT_SETTINGS;
     }
   });
+  ipcMain.handle("history:copyImagePath", async (_event, id: string) => {
+    try {
+      return await copyImagePath(id);
+    } catch (error) {
+      console.error("history:copyImagePath error:", error);
+      return { ok: false, reason: "write-failed" };
+    }
+  });
   ipcMain.handle("history:preview", async (_event, id: string) => {
     try {
       return await previewHistoryItem(id);
@@ -390,6 +400,27 @@ async function copyHistoryItem(id: string): Promise<{ ok: boolean; reason?: "mis
   }
 
   return { ok: true };
+}
+
+async function copyImagePath(id: string): Promise<{
+  ok: boolean;
+  path?: string;
+  reason?: "missing" | "not-image" | "write-failed";
+}> {
+  const content = await store.getContent(id);
+  if (!content) {
+    return { ok: false, reason: "missing" };
+  }
+  if (content.type !== "image") {
+    return { ok: false, reason: "not-image" };
+  }
+
+  const exportDir = join(app.getPath("userData"), "exported-images");
+  const imagePath = join(exportDir, `${id}.png`);
+  await mkdir(exportDir, { recursive: true });
+  await writeFile(imagePath, content.png);
+  clipboard.writeText(imagePath);
+  return { ok: true, path: imagePath };
 }
 
 async function applyHotkeySettings(settings: AppSettings): Promise<void> {
@@ -529,16 +560,11 @@ function toElectronAccelerator(hotkey: string): string {
 }
 
 function createTrayIcon(): Electron.NativeImage {
-  const svg = [
-    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">',
-    '<rect width="32" height="32" rx="7" fill="#20322f"/>',
-    '<path d="M11 7h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H11a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" fill="#e9f2ed"/>',
-    '<path d="M13 5h6a2 2 0 0 1 2 2v3h-10V7a2 2 0 0 1 2-2Z" fill="#4f8b7d"/>',
-    '<path d="M13 15h6M13 19h5" stroke="#20322f" stroke-width="2" stroke-linecap="round"/>',
-    "</svg>"
-  ].join("");
-
-  return nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+  const icon = nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_PNG_BASE64, "base64"));
+  if (icon.isEmpty()) {
+    throw new Error("Failed to decode the tray icon PNG");
+  }
+  return icon;
 }
 
 app.on("activate", () => {

@@ -66,6 +66,15 @@ export const IconFile = createIcon(
   </>
 );
 
+export const IconFilePath = createIcon(
+  <>
+    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z" />
+    <polyline points="14 2 14 8 20 8" />
+    <path d="M8 15h8" />
+    <path d="m13 12 3 3-3 3" />
+  </>
+);
+
 export const IconEye = createIcon(
   <>
     <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />

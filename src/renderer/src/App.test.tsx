@@ -58,6 +58,7 @@ function mockClipHistory(overrides?: Partial<ClipboardHistoryApi>): ClipboardHis
   return {
     list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([]),
     copy: vi.fn<ClipboardHistoryApi["copy"]>().mockResolvedValue({ ok: true }),
+    copyImagePath: vi.fn<ClipboardHistoryApi["copyImagePath"]>().mockResolvedValue({ ok: true, path: "C:\\images\\image.png" }),
     preview: vi.fn<ClipboardHistoryApi["preview"]>().mockResolvedValue({ ok: false, reason: "unsupported" }),
     delete: vi.fn<ClipboardHistoryApi["delete"]>().mockResolvedValue({ ok: true }),
     deleteMany: vi.fn<ClipboardHistoryApi["deleteMany"]>().mockResolvedValue({ ok: true, count: 0 }),
@@ -185,6 +186,32 @@ describe("App", () => {
     expect(preview.textContent).toHaveLength(100_000);
     fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
     expect(preview.textContent).toHaveLength(100_001);
+  });
+
+  test("copies an exported path for an image history item", async () => {
+    const copyImagePath = vi.fn<ClipboardHistoryApi["copyImagePath"]>()
+      .mockResolvedValue({ ok: true, path: "C:\\images\\image-path.png" });
+    window.clipHistory = mockClipHistory({
+      copyImagePath,
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([{
+        id: "image-path",
+        type: "image",
+        thumbnailDataUrl: "data:image/png;base64,dGh1bWI=",
+        width: 640,
+        height: 480,
+        byteSize: 5,
+        createdAt: "2026-07-15T10:00:00.000Z",
+        updatedAt: "2026-07-15T10:00:00.000Z",
+        pinned: false,
+        copyCount: 1
+      }])
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByTitle("复制图片路径"));
+
+    await waitFor(() => expect(copyImagePath).toHaveBeenCalledWith("image-path"));
+    expect((await screen.findAllByText("图片路径已复制")).length).toBeGreaterThan(0);
   });
 
   test("replaces the thumbnail with original image data in preview", async () => {

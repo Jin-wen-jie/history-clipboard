@@ -215,6 +215,17 @@ export function useClipboardHistory() {
     }
   }
 
+  async function copyImagePath(id: string) {
+    try {
+      const result = await window.clipHistory.copyImagePath(id);
+      setLastAction(result.ok ? "图片路径已复制" : "图片路径复制失败");
+      return result;
+    } catch {
+      setLastAction("图片路径复制失败");
+      return { ok: false as const, reason: "write-failed" as const };
+    }
+  }
+
   async function setStartupEnabled(enabled: boolean): Promise<void> {
     if (startupActionPendingRef.current) {
       return;
@@ -283,6 +294,7 @@ export function useClipboardHistory() {
     clearDateFilter,
     // Actions
     copyItem,
+    copyImagePath,
     deleteItem,
     deleteItems,
     togglePinned,

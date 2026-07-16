@@ -103,11 +103,22 @@ function createAppHarness(options: {
       launchItems.push(loginItem(path, [...args], settings.enabled ?? true));
     }
   });
-  const getLoginItemSettings = vi.fn((_query?: LoginItemQuery): LoginItemSettings => {
+  const getLoginItemSettings = vi.fn((query?: LoginItemQuery): LoginItemSettings => {
     if (options.queryError) {
       throw options.queryError;
     }
-    return options.queryResult ?? loginSettings([...launchItems]);
+    if (options.queryResult) {
+      return options.queryResult;
+    }
+
+    const queryPath = query?.path ?? executablePath;
+    const queryArgs = query?.args ?? [];
+    const openAtLogin = launchItems.some((item) => (
+      item.path === queryPath
+      && item.enabled
+      && sameArgs(item.args, queryArgs)
+    ));
+    return loginSettings([...launchItems], { openAtLogin });
   });
 
   return {
@@ -189,19 +200,17 @@ describe("StartupManager", () => {
   });
 
   test.each([
-    ["an exact enabled item", [loginItem(executablePath, [LOGIN_ITEM_ARG])], true, null],
-    ["a different path", [loginItem(`${executablePath}.old`, [LOGIN_ITEM_ARG])], false, "state-mismatch"],
-    ["extra arguments", [loginItem(executablePath, [LOGIN_ITEM_ARG, "--extra"])], false, "state-mismatch"],
-    ["arguments in a different position", [loginItem(executablePath, ["--extra", LOGIN_ITEM_ARG])], false, "state-mismatch"],
-    ["a disabled item", [loginItem(executablePath, [LOGIN_ITEM_ARG], false)], false, "state-mismatch"]
+    ["an exact enabled item", [loginItem(executablePath, [LOGIN_ITEM_ARG])], true, true, null],
+    ["a differently formatted launch item accepted by Electron", [loginItem(`${executablePath}.old`, [LOGIN_ITEM_ARG])], true, true, null],
+    ["an item Electron reports as disabled", [loginItem(executablePath, [LOGIN_ITEM_ARG])], false, false, "state-mismatch"]
   ] as const)(
-    "strictly evaluates %s from launchItems",
-    async (_name, items, actualEnabled, error) => {
+    "uses Electron's openAtLogin result for %s",
+    async (_name, items, openAtLogin, actualEnabled, error) => {
       const settings = createSettingsHarness({ launchAtStartup: true });
       const app = createAppHarness({
         queryResult: loginSettings([...items], {
-          openAtLogin: true,
-          executableWillLaunchAtLogin: true
+          openAtLogin,
+          executableWillLaunchAtLogin: openAtLogin
         })
       });
       const manager = new StartupManager(app.app, settings, executablePath);

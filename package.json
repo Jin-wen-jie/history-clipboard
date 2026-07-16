@@ -14,14 +14,19 @@
     "build:helper": "node scripts/buildClipboardListener.cjs",
     "test:helper": "node scripts/buildClipboardListener.cjs --tests && build\\clipboard-listener-tests.exe",
     "dist": "npm run build && electron-builder --win nsis",
-    "dist:ci": "npm run build && node scripts/buildCiArtifacts.cjs"
+    "dist:ci": "npm run build && node scripts/buildCiArtifacts.cjs",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build --no-bundle && node scripts/buildTauriInstaller.cjs"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "electron-updater": "^6.8.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
     "@types/node": "^22.13.1",

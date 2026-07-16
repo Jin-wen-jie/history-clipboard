@@ -9,4 +9,10 @@ describe("main entry module imports", () => {
     expect(entry).toContain("const { autoUpdater } = updaterModule;");
     expect(entry).not.toContain('import { autoUpdater } from "electron-updater";');
   });
+
+  test("creates the Windows tray icon from PNG data", () => {
+    expect(entry).toContain('nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_PNG_BASE64, "base64"))');
+    expect(entry).toContain("icon.isEmpty()");
+    expect(entry).not.toContain("data:image/svg+xml");
+  });
 });

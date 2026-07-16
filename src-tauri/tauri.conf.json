@@ -1,0 +1,42 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "历史剪贴板",
+  "version": "0.1.7",
+  "identifier": "com.local.historyclipboard",
+  "build": {
+    "frontendDist": "../out/renderer",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "electron-vite --rendererOnly",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "历史剪贴板",
+        "label": "main",
+        "width": 980,
+        "height": 700,
+        "minWidth": 760,
+        "minHeight": 520,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "backgroundColor": "#f3f5f2"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../build/clipboard-listener.exe": "clipboard-listener.exe"
+    },
+    "icon": ["icons/icon.ico"],
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}

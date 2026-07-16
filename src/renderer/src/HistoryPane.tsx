@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { IconClipboard, IconCopy, IconEye, IconPin, IconPinOff, IconRefreshCw, IconSearch, IconTrash2 } from "./icons";
+import { IconClipboard, IconCopy, IconEye, IconFilePath, IconPin, IconPinOff, IconRefreshCw, IconSearch, IconTrash2 } from "./icons";
 import type { HistoryFilterType, HistoryItem } from "../../shared/types";
 import { HistoryRow } from "./HistoryRow";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
@@ -23,6 +23,7 @@ type HistoryPaneProps = {
   onClearDateFilter: () => void;
   onRefresh: () => void;
   onCopy: (id: string) => void;
+  onCopyImagePath: (id: string) => Promise<{ ok: boolean; reason?: "missing" | "not-image" | "write-failed" }>;
   onTogglePin: (item: HistoryItem) => void;
   onDelete: (id: string) => void;
   onDeleteMany: (ids: string[]) => void;
@@ -66,6 +67,7 @@ export function HistoryPane({
   onClearDateFilter,
   onRefresh,
   onCopy,
+  onCopyImagePath,
   onTogglePin,
   onDelete,
   onDeleteMany,
@@ -200,6 +202,12 @@ export function HistoryPane({
     }
   }
 
+  async function copySelectedImagePath() {
+    if (!ctxMenu?.item || ctxMenu.item.type !== "image") return;
+    const result = await onCopyImagePath(ctxMenu.item.id);
+    onAddToast(result.ok ? "图片路径已复制" : "图片路径复制失败", result.ok ? "success" : "error");
+  }
+
   function ctxTogglePin() {
     if (ctxMenu?.item) {
       onTogglePin(ctxMenu.item);
@@ -224,6 +232,9 @@ export function HistoryPane({
       ? [
         { label: "查看内容", icon: <IconEye size={15} />, onClick: ctxPreview },
         { label: "复制", icon: <IconCopy size={15} />, onClick: ctxCopy },
+        ...(ctxMenu.item.type === "image"
+          ? [{ label: "复制图片路径", icon: <IconFilePath size={15} />, onClick: () => void copySelectedImagePath() }]
+          : []),
         { label: ctxMenu.item.pinned ? "取消置顶" : "置顶", icon: ctxMenu.item.pinned ? <IconPinOff size={15} /> : <IconPin size={15} />, onClick: ctxTogglePin },
         { label: "---" },
         { label: "删除", icon: <IconTrash2 size={15} />, danger: true, onClick: ctxDelete }
@@ -362,6 +373,11 @@ export function HistoryPane({
               focused={index === focusedIndex}
               searchQuery={search}
               onCopy={onCopy}
+              onCopyImagePath={(id) => {
+                void onCopyImagePath(id).then((result) => {
+                  onAddToast(result.ok ? "图片路径已复制" : "图片路径复制失败", result.ok ? "success" : "error");
+                });
+              }}
               onTogglePin={onTogglePin}
               onDelete={onDelete}
               onSelect={toggleSelect}
