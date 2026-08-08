@@ -190,12 +190,13 @@ describe("StartupManager", () => {
 
   test.each([
     ["an exact enabled item", [loginItem(executablePath, [LOGIN_ITEM_ARG])], true, null],
+    ["an item with no args (Electron Windows quirk)", [loginItem(executablePath, [])], true, null],
+    ["extra arguments", [loginItem(executablePath, [LOGIN_ITEM_ARG, "--extra"])], true, null],
+    ["arguments in a different position", [loginItem(executablePath, ["--extra", LOGIN_ITEM_ARG])], true, null],
     ["a different path", [loginItem(`${executablePath}.old`, [LOGIN_ITEM_ARG])], false, "state-mismatch"],
-    ["extra arguments", [loginItem(executablePath, [LOGIN_ITEM_ARG, "--extra"])], false, "state-mismatch"],
-    ["arguments in a different position", [loginItem(executablePath, ["--extra", LOGIN_ITEM_ARG])], false, "state-mismatch"],
     ["a disabled item", [loginItem(executablePath, [LOGIN_ITEM_ARG], false)], false, "state-mismatch"]
   ] as const)(
-    "strictly evaluates %s from launchItems",
+    "evaluates %s from launchItems",
     async (_name, items, actualEnabled, error) => {
       const settings = createSettingsHarness({ launchAtStartup: true });
       const app = createAppHarness({
