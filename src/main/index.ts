@@ -141,6 +141,14 @@ async function bootstrap(): Promise<void> {
   autoUpdater.checkForUpdatesAndNotify().catch((error) => {
     console.error("Auto-update check failed:", error);
   });
+
+  // Check for updates hourly while the app is running, so a released
+  // version reaches users shortly after publishing (not only on launch).
+  setInterval(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+      console.error("Scheduled auto-update check failed:", error);
+    });
+  }, 60 * 60 * 1000).unref();
 }
 
 function createWindow(): void {
