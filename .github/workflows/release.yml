@@ -32,7 +32,37 @@ jobs:
       - run: npm test
       - run: npm run build
 
-      - name: Build & publish installer
+      - name: Build installer
+        run: npx electron-builder --win nsis --publish never
+
+      - name: Publish to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win nsis --publish always
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.Substring(1)
+
+          # Create the release idempotently (ignore "already exists" errors).
+          gh release create $tag --title "历史剪贴板 $tag" --notes "历史剪贴板 $tag" 2>$null
+          if ($LASTEXITCODE -notin 0, 1) { throw "Failed to create release" }
+
+          # Upload artifacts; asset names match the urls inside latest.yml.
+          gh release upload $tag `
+            release/history-clipboard-setup-$version.exe `
+            release/history-clipboard-setup-$version.exe.blockmap `
+            release/latest.yml --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release assets" }
+
+          # Verify every update-channel file actually landed, so a broken
+          # release is reported loudly instead of silently confusing users.
+          $names = gh release view $tag --json assets --jq '.assets[].name'
+          foreach ($need in @(
+            "history-clipboard-setup-$version.exe",
+            "history-clipboard-setup-$version.exe.blockmap",
+            "latest.yml"
+          )) {
+            if ($names -notcontains $need) { throw "Missing release asset: $need" }
+          }
+          Write-Host "Release verified: installer + blockmap + latest.yml"

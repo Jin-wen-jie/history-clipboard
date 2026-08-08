@@ -63,7 +63,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "${productName} Setup ${version}.${ext}",
+      "artifactName": "history-clipboard-setup-${version}.${ext}",
       "unicode": true
     },
     "afterPack": "./scripts/afterPack.cjs",
