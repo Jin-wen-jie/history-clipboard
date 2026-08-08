@@ -27,6 +27,7 @@ export function App() {
     setDateTo,
     clearDateFilter,
     copyItem,
+    copyPathItem,
     deleteItem,
     deleteItems,
     togglePinned,
@@ -55,9 +56,10 @@ export function App() {
         onDateFromChange={setDateFrom}
         onDateToChange={setDateTo}
         onClearDateFilter={clearDateFilter}
-        onRefresh={() => void load(true)}
-        onCopy={copyItem}
-        onTogglePin={togglePinned}
+    onRefresh={() => void load(true)}
+    onCopy={copyItem}
+    onCopyPath={copyPathItem}
+    onTogglePin={togglePinned}
         onDelete={deleteItem}
         onDeleteMany={deleteItems}
         onCopyItem={copyItem}

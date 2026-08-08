@@ -114,9 +114,14 @@ export type HistoryPreviewResult =
   | { ok: true; type: "file-text"; text: string; formatted: boolean }
   | { ok: false; reason: "missing" | "unsupported" | "too-large" };
 
+export type CopyPathResult =
+  | { ok: true; path: string }
+  | { ok: false; reason: "missing" | "unsupported" | "export-failed" };
+
 export type ClipboardHistoryApi = {
   list(query?: HistoryQuery): Promise<HistoryItem[]>;
   copy(id: string): Promise<{ ok: boolean; reason?: "missing" }>;
+  copyPath(id: string): Promise<CopyPathResult>;
   preview(id: string): Promise<HistoryPreviewResult>;
   delete(id: string): Promise<{ ok: boolean }>;
   deleteMany(ids: string[]): Promise<{ ok: boolean; count: number }>;

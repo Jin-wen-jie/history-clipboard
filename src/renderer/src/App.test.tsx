@@ -58,6 +58,7 @@ function mockClipHistory(overrides?: Partial<ClipboardHistoryApi>): ClipboardHis
   return {
     list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([]),
     copy: vi.fn<ClipboardHistoryApi["copy"]>().mockResolvedValue({ ok: true }),
+    copyPath: vi.fn<ClipboardHistoryApi["copyPath"]>().mockResolvedValue({ ok: true, path: "C:\\mock\\file.png" }),
     preview: vi.fn<ClipboardHistoryApi["preview"]>().mockResolvedValue({ ok: false, reason: "unsupported" }),
     delete: vi.fn<ClipboardHistoryApi["delete"]>().mockResolvedValue({ ok: true }),
     deleteMany: vi.fn<ClipboardHistoryApi["deleteMany"]>().mockResolvedValue({ ok: true, count: 0 }),

@@ -4,6 +4,7 @@ import type { ClipboardHistoryApi, EditableSettingsPatch, HistoryFilterType, His
 const api: ClipboardHistoryApi = {
   list: (query?: HistoryQuery) => ipcRenderer.invoke("history:list", query),
   copy: (id: string) => ipcRenderer.invoke("history:copy", id),
+  copyPath: (id: string) => ipcRenderer.invoke("history:copyPath", id),
   preview: (id: string) => ipcRenderer.invoke("history:preview", id),
   delete: (id: string) => ipcRenderer.invoke("history:delete", id),
   deleteMany: (ids: string[]) => ipcRenderer.invoke("history:deleteMany", ids),

@@ -1288,6 +1288,37 @@ button, input, select, textarea {
   overflow-wrap: anywhere;
 }
 
+.content-preview-path-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.content-preview-path-row p {
+  margin-bottom: 0;
+}
+
+.modal-copy-path {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.modal-copy-path:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 @keyframes modalIn {
   from {
     opacity: 0;

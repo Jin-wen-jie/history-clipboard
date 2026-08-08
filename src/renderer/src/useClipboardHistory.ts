@@ -170,6 +170,23 @@ export function useClipboardHistory() {
     }
   }
 
+  async function copyPathItem(id: string): Promise<{ ok: boolean; reason?: "missing" | "unsupported" | "export-failed" }> {
+    try {
+      const result = await window.clipHistory.copyPath(id);
+      setLastAction(
+        result.ok
+          ? "已复制路径"
+          : result.reason === "missing"
+            ? "原文件已不存在"
+            : "复制路径失败"
+      );
+      return result;
+    } catch (error) {
+      setLastAction(error instanceof Error ? error.message : "复制路径失败");
+      return { ok: false };
+    }
+  }
+
   async function deleteItem(id: string): Promise<void> {
     try {
       await window.clipHistory.delete(id);
@@ -283,6 +300,7 @@ export function useClipboardHistory() {
     clearDateFilter,
     // Actions
     copyItem,
+    copyPathItem,
     deleteItem,
     deleteItems,
     togglePinned,

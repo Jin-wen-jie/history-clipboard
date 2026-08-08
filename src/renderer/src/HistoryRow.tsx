@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconClipboard, IconCopy, IconEye, IconFile, IconImage, IconPin, IconPinOff, IconTrash2 } from "./icons";
+import { IconClipboard, IconCopy, IconEye, IconFile, IconImage, IconLink, IconPin, IconPinOff, IconTrash2 } from "./icons";
 import type { HistoryItem } from "../../shared/types";
 import { formatBytes } from "../../shared/format";
 
@@ -9,6 +9,7 @@ type HistoryRowProps = {
   focused: boolean;
   searchQuery: string;
   onCopy: (id: string) => void;
+  onCopyPath: (id: string) => void;
   onTogglePin: (item: HistoryItem) => void;
   onDelete: (id: string) => void;
   onSelect: (id: string, checked: boolean) => void;
@@ -55,6 +56,7 @@ export function HistoryRow({
   focused,
   searchQuery,
   onCopy,
+  onCopyPath,
   onTogglePin,
   onDelete,
   onSelect,
@@ -129,6 +131,11 @@ export function HistoryRow({
         <button className="icon-button" type="button" title="复制" onClick={() => onCopy(item.id)}>
           <IconCopy size={16} />
         </button>
+        {item.type !== "text" && (
+          <button className="icon-button" type="button" title="复制路径" onClick={() => onCopyPath(item.id)}>
+            <IconLink size={16} />
+          </button>
+        )}
         <button className="icon-button" type="button" title={item.pinned ? "取消置顶" : "置顶"} onClick={() => onTogglePin(item)}>
           {item.pinned ? <IconPinOff size={16} /> : <IconPin size={16} />}
         </button>

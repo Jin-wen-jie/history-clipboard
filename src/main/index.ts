@@ -1,9 +1,10 @@
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, Tray } from "electron";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_SETTINGS, type AppSettings, type HistoryFilterType, type HistoryPreviewResult, type HistoryQuery } from "../shared/types";
+import { DEFAULT_SETTINGS, type AppSettings, type CopyPathResult, type HistoryFilterType, type HistoryPreviewResult, type HistoryQuery } from "../shared/types";
 import {
   ClipboardRuntime,
   shouldReconcileAfterSettingsChange
@@ -280,6 +281,14 @@ function registerIpc(): void {
       return { ok: false };
     }
   });
+  ipcMain.handle("history:copyPath", async (_event, id: string) => {
+    try {
+      return await copyPathHistoryItem(id);
+    } catch (error) {
+      console.error("history:copyPath error:", error);
+      return { ok: false, reason: "export-failed" };
+    }
+  });
   ipcMain.handle("settings:get", async () => {
     try {
       return await store.getSettings();
@@ -398,6 +407,38 @@ async function copyHistoryItem(id: string): Promise<{ ok: boolean; reason?: "mis
   }
 
   return { ok: true };
+}
+
+async function copyPathHistoryItem(id: string): Promise<CopyPathResult> {
+  const content = await store.getContent(id);
+  if (!content) {
+    return { ok: false, reason: "unsupported" };
+  }
+
+  if (content.type === "text") {
+    return { ok: false, reason: "unsupported" };
+  }
+
+  if (content.type === "file") {
+    try {
+      if (!statSync(content.path).isFile()) {
+        return { ok: false, reason: "missing" };
+      }
+    } catch {
+      return { ok: false, reason: "missing" };
+    }
+    clipboard.writeText(content.path);
+    return { ok: true, path: content.path };
+  }
+
+  // Images live inside the app vault (no real file path), so export the PNG
+  // to a stable folder first, then copy the exported file's path.
+  const exportDir = join(app.getPath("userData"), "exported-images");
+  const exportPath = join(exportDir, `${id}.png`);
+  await mkdir(exportDir, { recursive: true });
+  await writeFile(exportPath, content.png);
+  clipboard.writeText(exportPath);
+  return { ok: true, path: exportPath };
 }
 
 async function applyHotkeySettings(settings: AppSettings): Promise<void> {

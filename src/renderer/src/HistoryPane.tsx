@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { IconClipboard, IconCopy, IconEye, IconPin, IconPinOff, IconRefreshCw, IconSearch, IconTrash2 } from "./icons";
+import { IconClipboard, IconCopy, IconEye, IconLink, IconPin, IconPinOff, IconRefreshCw, IconSearch, IconTrash2 } from "./icons";
 import type { HistoryFilterType, HistoryItem } from "../../shared/types";
 import { HistoryRow } from "./HistoryRow";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
@@ -23,6 +23,7 @@ type HistoryPaneProps = {
   onClearDateFilter: () => void;
   onRefresh: () => void;
   onCopy: (id: string) => void;
+  onCopyPath: (id: string) => Promise<{ ok: boolean; reason?: "missing" | "unsupported" | "export-failed" }>;
   onTogglePin: (item: HistoryItem) => void;
   onDelete: (id: string) => void;
   onDeleteMany: (ids: string[]) => void;
@@ -66,6 +67,7 @@ export function HistoryPane({
   onClearDateFilter,
   onRefresh,
   onCopy,
+  onCopyPath,
   onTogglePin,
   onDelete,
   onDeleteMany,
@@ -194,6 +196,20 @@ export function HistoryPane({
     }
   }
 
+  function ctxCopyPath() {
+    const item = ctxMenu?.item;
+    if (!item) return;
+    void onCopyPath(item.id).then((result) => {
+      if (result.ok) {
+        onAddToast("已复制路径", "success");
+      } else if (result.reason === "missing") {
+        onAddToast("原文件已不存在", "error");
+      } else {
+        onAddToast("复制路径失败", "error");
+      }
+    });
+  }
+
   function ctxPreview() {
     if (ctxMenu?.item) {
       setPreviewItem(ctxMenu.item);
@@ -224,6 +240,9 @@ export function HistoryPane({
       ? [
         { label: "查看内容", icon: <IconEye size={15} />, onClick: ctxPreview },
         { label: "复制", icon: <IconCopy size={15} />, onClick: ctxCopy },
+        ...(ctxMenu.item.type !== "text"
+          ? [{ label: "复制路径", icon: <IconLink size={15} />, onClick: ctxCopyPath }]
+          : []),
         { label: ctxMenu.item.pinned ? "取消置顶" : "置顶", icon: ctxMenu.item.pinned ? <IconPinOff size={15} /> : <IconPin size={15} />, onClick: ctxTogglePin },
         { label: "---" },
         { label: "删除", icon: <IconTrash2 size={15} />, danger: true, onClick: ctxDelete }
@@ -362,6 +381,7 @@ export function HistoryPane({
               focused={index === focusedIndex}
               searchQuery={search}
               onCopy={onCopy}
+              onCopyPath={onCopyPath}
               onTogglePin={onTogglePin}
               onDelete={onDelete}
               onSelect={toggleSelect}
@@ -389,6 +409,8 @@ export function HistoryPane({
         <ContentPreview
           item={previewItem}
           onClose={() => setPreviewItem(null)}
+          onCopyPath={onCopyPath}
+          onAddToast={onAddToast}
         />
       )}
     </section>

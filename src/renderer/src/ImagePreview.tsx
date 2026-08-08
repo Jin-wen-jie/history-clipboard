@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { IconMinus, IconPlus, IconX } from "./icons";
+import { IconLink, IconMinus, IconPlus, IconX } from "./icons";
 import { formatBytes } from "../../shared/format";
 import type { HistoryItem, HistoryPreviewResult } from "../../shared/types";
 
@@ -8,9 +8,11 @@ const TEXT_CHUNK_SIZE = 100_000;
 type ContentPreviewProps = {
   item: HistoryItem;
   onClose: () => void;
+  onCopyPath: (id: string) => Promise<{ ok: boolean; reason?: "missing" | "unsupported" | "export-failed" }>;
+  onAddToast: (text: string, type?: "success" | "error" | "info") => void;
 };
 
-export function ContentPreview({ item, onClose }: ContentPreviewProps) {
+export function ContentPreview({ item, onClose, onCopyPath, onAddToast }: ContentPreviewProps) {
   const [fontSize, setFontSize] = useState(16);
   const [visibleCharacters, setVisibleCharacters] = useState(TEXT_CHUNK_SIZE);
   const [preview, setPreview] = useState<HistoryPreviewResult | null>(null);
@@ -72,6 +74,18 @@ export function ContentPreview({ item, onClose }: ContentPreviewProps) {
       ? preview.reason
       : null;
 
+  function handleCopyPath() {
+    void onCopyPath(item.id).then((result) => {
+      if (result.ok) {
+        onAddToast("已复制路径", "success");
+      } else if (result.reason === "missing") {
+        onAddToast("原文件已不存在", "error");
+      } else {
+        onAddToast("复制路径失败", "error");
+      }
+    });
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
@@ -90,6 +104,10 @@ export function ContentPreview({ item, onClose }: ContentPreviewProps) {
             <div className="modal-image-info">
               <span>{item.width} × {item.height} 像素</span>
               <span>{loading ? "正在读取原图" : formatBytes(item.byteSize)}</span>
+              <button className="modal-copy-path" type="button" onClick={handleCopyPath} title="复制图片文件路径">
+                <IconLink size={14} />
+                复制路径
+              </button>
             </div>
           </>
         ) : (
@@ -125,7 +143,13 @@ export function ContentPreview({ item, onClose }: ContentPreviewProps) {
             ) : item.type === "file" ? (
               <div className="content-preview-file">
                 <span>完整路径</span>
-                <p>{item.path}</p>
+                <div className="content-preview-path-row">
+                  <p>{item.path}</p>
+                  <button className="modal-copy-path" type="button" onClick={handleCopyPath} title="复制文件路径">
+                    <IconLink size={14} />
+                    复制路径
+                  </button>
+                </div>
                 <span>文件大小</span>
                 <p>{formatBytes(item.byteSize)}</p>
                 <span>内容预览</span>
