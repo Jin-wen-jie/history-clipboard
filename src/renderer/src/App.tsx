@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { UpdaterState } from "../../shared/types";
 import { useClipboardHistory } from "./useClipboardHistory";
 import { HistoryPane } from "./HistoryPane";
 import { SettingsPane } from "./SettingsPane";
@@ -39,6 +41,13 @@ export function App() {
 
   const { toasts, addToast, removeToast } = useToasts();
 
+  const [updaterState, setUpdaterState] = useState<UpdaterState | undefined>(undefined);
+
+  useEffect(() => {
+    void window.clipHistory?.getUpdaterState().then(setUpdaterState);
+    return window.clipHistory?.onUpdaterState(setUpdaterState);
+  }, []);
+
   return (
     <main className="app-shell">
       <HistoryPane
@@ -76,6 +85,8 @@ export function App() {
         onToggleLaunchAtStartup={(enabled) => void setStartupEnabled(enabled)}
         onClear={() => void clearCurrent()}
         onSaveSettings={(patch) => void updateEditableSettings(patch)}
+        updaterState={updaterState}
+        onCheckUpdates={() => void window.clipHistory?.checkForUpdates().then(setUpdaterState)}
         addToast={addToast}
       />
       {startupState?.pendingDecision === true && startupActionError === null && (

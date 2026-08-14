@@ -487,6 +487,57 @@ describe("HistoryStore", () => {
     );
   });
 
+  test("keeps pinned items when maxItems is exceeded", async () => {
+    const pinned = await store.addText("pinned-old");
+    expect(pinned.ok).toBe(true);
+    if (!pinned.ok) throw new Error("expected text item");
+    await store.setPinned(pinned.item.id, true);
+
+    currentTime = new Date("2026-06-23T12:01:00.000Z");
+    await store.addText("two");
+    currentTime = new Date("2026-06-23T12:02:00.000Z");
+    await store.addText("three");
+    currentTime = new Date("2026-06-23T12:03:00.000Z");
+    const fourth = await store.addText("four");
+    expect(fourth.ok).toBe(true);
+
+    // maxItems only caps non-pinned entries; the pinned item survives.
+    const items = await store.list();
+    expect(items.map((item) => item.id)).toContain(pinned.item.id);
+    expect(items).toHaveLength(4);
+  });
+
+  test("keeps pinned items past the retention window", async () => {
+    const pinned = await store.addText("old-pinned");
+    expect(pinned.ok).toBe(true);
+    if (!pinned.ok) throw new Error("expected text item");
+    await store.setPinned(pinned.item.id, true);
+
+    currentTime = new Date("2026-08-10T12:00:00.000Z");
+    const fresh = await store.addText("fresh");
+    expect(fresh.ok).toBe(true);
+
+    const items = await store.list();
+    expect(items.map((item) => item.id)).toContain(pinned.item.id);
+  });
+
+  test("skips malformed text entries during import instead of failing", async () => {
+    const result = await store.importFromJson(JSON.stringify({
+      version: 1,
+      items: [
+        { type: "text", text: "good" },
+        { type: "text" },
+        { type: "text", text: 12345 },
+        { type: "image" }
+      ]
+    }));
+
+    expect(result).toEqual({ imported: 1, skipped: 3 });
+    const items = await store.list();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ type: "text", text: "good" });
+  });
+
   test("unreadable cleanup commits metadata before deleting encrypted content", async () => {
     await writeFile(join(dir, "history.json"), JSON.stringify({
       version: 1,

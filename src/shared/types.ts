@@ -92,6 +92,20 @@ export type EditableSettingsPatch = Partial<
   Omit<AppSettings, "launchAtStartup" | "startupDecisionVersion" | "textLimitMigrationVersion">
 >;
 
+export type UpdaterPhase = "idle" | "checking" | "available" | "downloading" | "downloaded" | "error";
+
+export type UpdaterState = {
+  phase: UpdaterPhase;
+  version: string | null;
+  targetVersion: string | null;
+  percent: number | null;
+  transferredBytes: number | null;
+  totalBytes: number | null;
+  bytesPerSecond: number | null;
+  error: string | null;
+  lastCheckAt: number | null;
+};
+
 export type StorageStats = {
   totalItems: number;
   textItems: number;
@@ -134,6 +148,9 @@ export type ClipboardHistoryApi = {
   setStartupEnabled(enabled: boolean): Promise<StartupState>;
   getBackgroundState(): Promise<ClipboardBackgroundState>;
   showWindow(): Promise<void>;
+  checkForUpdates(): Promise<UpdaterState>;
+  getUpdaterState(): Promise<UpdaterState>;
+  onUpdaterState(callback: (state: UpdaterState) => void): () => void;
   exportHistory(): Promise<{ ok: boolean; reason?: string }>;
   importHistory(): Promise<{ ok: boolean; reason?: string; imported?: number; skipped?: number }>;
 };

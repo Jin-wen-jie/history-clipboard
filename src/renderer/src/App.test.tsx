@@ -6,9 +6,11 @@ import {
   DEFAULT_SETTINGS,
   type ClipboardBackgroundState,
   type ClipboardHistoryApi,
-  type StartupState
+  type StartupState,
+  type UpdaterState
 } from "../../shared/types";
 import { App } from "./App";
+import { dateToFrom, dateToTo } from "./useClipboardHistory";
 
 const DEFAULT_STARTUP_STATE: StartupState = {
   desiredEnabled: true,
@@ -44,6 +46,18 @@ function backgroundState(
   return { ...DEFAULT_BACKGROUND_STATE, ...overrides };
 }
 
+const DEFAULT_UPDATER_STATE: UpdaterState = {
+  phase: "idle",
+  version: "0.1.9",
+  targetVersion: null,
+  percent: null,
+  transferredBytes: null,
+  totalBytes: null,
+  bytesPerSecond: null,
+  error: null,
+  lastCheckAt: null
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -71,6 +85,9 @@ function mockClipHistory(overrides?: Partial<ClipboardHistoryApi>): ClipboardHis
     setStartupEnabled: vi.fn<ClipboardHistoryApi["setStartupEnabled"]>().mockResolvedValue(DEFAULT_STARTUP_STATE),
     getBackgroundState: vi.fn<ClipboardHistoryApi["getBackgroundState"]>().mockResolvedValue(DEFAULT_BACKGROUND_STATE),
     showWindow: vi.fn<ClipboardHistoryApi["showWindow"]>().mockResolvedValue(),
+    checkForUpdates: vi.fn<ClipboardHistoryApi["checkForUpdates"]>().mockResolvedValue(DEFAULT_UPDATER_STATE),
+    getUpdaterState: vi.fn<ClipboardHistoryApi["getUpdaterState"]>().mockResolvedValue(DEFAULT_UPDATER_STATE),
+    onUpdaterState: vi.fn<ClipboardHistoryApi["onUpdaterState"]>().mockReturnValue(() => {}),
     exportHistory: vi.fn<ClipboardHistoryApi["exportHistory"]>().mockResolvedValue({ ok: true }),
     importHistory: vi.fn<ClipboardHistoryApi["importHistory"]>().mockResolvedValue({ ok: true, imported: 0, skipped: 0 }),
     ...overrides
@@ -641,5 +658,99 @@ describe("App", () => {
       await staleLoad.promise;
     });
     expect(startupToggle.checked).toBe(true);
+  });
+});
+
+describe("failure feedback for destructive actions", () => {
+  function textItem(id: string, text: string) {
+    return {
+      id,
+      type: "text" as const,
+      text,
+      createdAt: "2026-06-23T06:00:00.000Z",
+      updatedAt: "2026-06-23T06:00:00.000Z",
+      pinned: false,
+      copyCount: 1
+    };
+  }
+
+  test("keeps the row and reports failure when delete is rejected", async () => {
+    const item = textItem("delete-fails", "keep me");
+    window.clipHistory = mockClipHistory({
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([item]),
+      delete: vi.fn<ClipboardHistoryApi["delete"]>().mockResolvedValue({ ok: false })
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    await screen.findByText("keep me");
+
+    fireEvent.click(screen.getByTitle("删除"));
+
+    await waitFor(() => {
+      expect(screen.getByText("keep me")).toBeTruthy();
+      expect(screen.getByText("删除失败")).toBeTruthy();
+    });
+  });
+
+  test("keeps the pin state and reports failure when setPinned is rejected", async () => {
+    const item = textItem("pin-fails", "pin me");
+    window.clipHistory = mockClipHistory({
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockResolvedValue([item]),
+      setPinned: vi.fn<ClipboardHistoryApi["setPinned"]>().mockResolvedValue({ ok: false })
+    });
+
+    render(<App />);
+    await screen.findByText("pin me");
+
+    fireEvent.click(screen.getByTitle("置顶"));
+
+    await waitFor(() => {
+      expect(screen.getByTitle("置顶")).toBeTruthy();
+      expect(screen.getByText("操作失败")).toBeTruthy();
+    });
+  });
+});
+
+describe("history list error state", () => {
+  test("shows an error state when the history list fails to load", async () => {
+    window.clipHistory = mockClipHistory({
+      list: vi.fn<ClipboardHistoryApi["list"]>().mockRejectedValue(new Error("boom"))
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/读取失败/)).toBeTruthy();
+  });
+});
+
+describe("date filter bounds", () => {
+  test("maps the picked calendar day to local midnight / end-of-day", () => {
+    const from = dateToFrom("2026-07-12")!;
+    const to = dateToTo("2026-07-12")!;
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    // Assertions are timezone-independent: parsing without a zone suffix is
+    // local, so local clock readings must match the user's chosen day.
+    expect(fromDate.getFullYear()).toBe(2026);
+    expect(fromDate.getMonth()).toBe(6);
+    expect(fromDate.getDate()).toBe(12);
+    expect(fromDate.getHours()).toBe(0);
+    expect(fromDate.getMinutes()).toBe(0);
+    expect(toDate.getFullYear()).toBe(2026);
+    expect(toDate.getMonth()).toBe(6);
+    expect(toDate.getDate()).toBe(12);
+    expect(toDate.getHours()).toBe(23);
+    expect(toDate.getMinutes()).toBe(59);
+  });
+
+  test("emits UTC instants that the store can compare via Date.parse", () => {
+    expect(dateToFrom("2026-07-12")!.endsWith("Z")).toBe(true);
+    expect(dateToTo("2026-07-12")!.endsWith("Z")).toBe(true);
+    expect(Number.isFinite(Date.parse(dateToFrom("2026-07-12")!))).toBe(true);
+    expect(Number.isFinite(Date.parse(dateToTo("2026-07-12")!))).toBe(true);
+    expect(dateToFrom("")).toBeUndefined();
+    expect(dateToTo("")).toBeUndefined();
   });
 });

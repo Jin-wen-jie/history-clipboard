@@ -563,6 +563,11 @@ namespace HistoryClipboard.ClipboardListener
 
             if (!_writerFailed && !_writerDrained.WaitOne(WriterDrainTimeoutMilliseconds))
             {
+                // The writer is stuck writing to a full pipe (reader paused or gone).
+                // Closing the stream now truncates the in-flight frame, which corrupts
+                // the protocol stream for any consumer still reading it. This is the
+                // last resort, never a clean shutdown: report it as a failure so the
+                // supervisor does not mistake a torn pipe for a successful exit.
                 try
                 {
                     _standardOutput.Close();
@@ -570,6 +575,7 @@ namespace HistoryClipboard.ClipboardListener
                 catch
                 {
                 }
+                MarkForcedWriterTermination();
             }
             _writerCancellation.Cancel();
             bool writerExited = _writerThread.Join(WriterJoinTimeoutMilliseconds);
@@ -606,6 +612,13 @@ namespace HistoryClipboard.ClipboardListener
             {
                 _fatalFailure = true;
             }
+        }
+
+        private static void MarkForcedWriterTermination()
+        {
+            // A frame-truncating stdout close is a torn shutdown even when a
+            // stop was requested: the writer never finished its current frame.
+            MarkFatalFailure();
         }
 
         private static bool HasFatalFailure()

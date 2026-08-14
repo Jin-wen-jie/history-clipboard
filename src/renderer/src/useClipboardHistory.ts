@@ -14,16 +14,19 @@ export type LoadState = "idle" | "loading" | "error";
 
 const STARTUP_ACTION_ERROR = "启动设置失败";
 
-/** Convert YYYY-MM-DD to an ISO start-of-day string (or undefined if empty) */
-function dateToFrom(dateStr: string): string | undefined {
+/** Convert YYYY-MM-DD to an ISO start-of-day instant (or undefined if empty). */
+export function dateToFrom(dateStr: string): string | undefined {
   if (!dateStr) return undefined;
-  return `${dateStr}T00:00:00.000Z`;
+  // Parse without a timezone suffix so the calendar day the user picked maps
+  // to local midnight; appending "Z" would shift the range by the UTC offset
+  // (e.g. an 8-hour error for UTC+8 users).
+  return new Date(`${dateStr}T00:00:00`).toISOString();
 }
 
-/** Convert YYYY-MM-DD to an ISO end-of-day string (or undefined if empty) */
-function dateToTo(dateStr: string): string | undefined {
+/** Convert YYYY-MM-DD to an ISO end-of-day instant (or undefined if empty). */
+export function dateToTo(dateStr: string): string | undefined {
   if (!dateStr) return undefined;
-  return `${dateStr}T23:59:59.999Z`;
+  return new Date(`${dateStr}T23:59:59.999`).toISOString();
 }
 
 export function useClipboardHistory() {
@@ -45,7 +48,11 @@ export function useClipboardHistory() {
   const latestItemIdRef = useRef<string | undefined>(undefined);
   const loadGenerationRef = useRef(0);
   const activeLoadRef = useRef<Promise<void> | null>(null);
-  const queuedLoadRef = useRef(false);
+  const queuedLoadRef = useRef<{
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (reason?: unknown) => void;
+  } | null>(null);
   const loadRef = useRef<(queueIfBusy?: boolean) => Promise<void>>(async () => undefined);
   const startupWriteVersionRef = useRef(0);
   const startupActionPendingRef = useRef(false);
@@ -60,8 +67,20 @@ export function useClipboardHistory() {
     const activeLoad = activeLoadRef.current;
     if (activeLoad) {
       if (queueIfBusy) {
-        queuedLoadRef.current = true;
         loadGenerationRef.current += 1;
+        // Callers awaiting the queued reload must wait for the reload itself,
+        // not for the in-flight load they can no longer observe. Reuse one
+        // deferred so multiple queueIfBusy calls settle together.
+        if (!queuedLoadRef.current) {
+          let resolve!: () => void;
+          let reject!: (reason?: unknown) => void;
+          const promise = new Promise<void>((nextResolve, nextReject) => {
+            resolve = nextResolve;
+            reject = nextReject;
+          });
+          queuedLoadRef.current = { promise, resolve, reject };
+        }
+        return queuedLoadRef.current.promise;
       }
       return activeLoad;
     }
@@ -139,9 +158,10 @@ export function useClipboardHistory() {
       }
 
       activeLoadRef.current = null;
-      if (queuedLoadRef.current) {
-        queuedLoadRef.current = false;
-        void loadRef.current();
+      const queued = queuedLoadRef.current;
+      if (queued) {
+        queuedLoadRef.current = null;
+        void loadRef.current().then(queued.resolve, queued.reject);
       }
     });
     return loadTask;
@@ -189,7 +209,11 @@ export function useClipboardHistory() {
 
   async function deleteItem(id: string): Promise<void> {
     try {
-      await window.clipHistory.delete(id);
+      const result = await window.clipHistory.delete(id);
+      if (!result.ok) {
+        setLastAction("删除失败");
+        return;
+      }
       setLastAction("已删除");
       setItems((prev) => prev.filter((item) => item.id !== id));
     } catch (error) {
@@ -201,6 +225,10 @@ export function useClipboardHistory() {
     if (ids.length === 0) return;
     try {
       const result = await window.clipHistory.deleteMany(ids);
+      if (!result.ok) {
+        setLastAction("删除失败");
+        return;
+      }
       setLastAction(`已删除 ${result.count} 条记录`);
       const idSet = new Set(ids);
       setItems((prev) => prev.filter((item) => !idSet.has(item.id)));
@@ -211,7 +239,11 @@ export function useClipboardHistory() {
 
   async function togglePinned(item: HistoryItem): Promise<void> {
     try {
-      await window.clipHistory.setPinned(item.id, !item.pinned);
+      const result = await window.clipHistory.setPinned(item.id, !item.pinned);
+      if (!result.ok) {
+        setLastAction("操作失败");
+        return;
+      }
       setItems((prev) =>
         prev.map((candidate) =>
           candidate.id === item.id ? { ...candidate, pinned: !candidate.pinned } : candidate

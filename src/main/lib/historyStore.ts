@@ -358,7 +358,7 @@ export class HistoryStore {
     let skipped = 0;
 
     for (const item of data.items) {
-      if (item.type === "text") {
+      if (item.type === "text" && typeof item.text === "string") {
         const hash = hashText(item.text);
         const exists = this.items.find((s) => s.type === "text" && s.hash === hash);
         if (exists) {
@@ -368,7 +368,10 @@ export class HistoryStore {
         const result = await this.addTextInternal(item.text);
         if (result.ok) imported++;
         else skipped++;
-      } else if (item.type === "image" || item.type === "file") {
+      } else {
+        // Images/files are not re-importable, and malformed entries (missing
+        // or mistyped `text`) must be skipped instead of failing the whole
+        // backup import.
         skipped++;
       }
     }
@@ -590,10 +593,15 @@ export class HistoryStore {
 
   private retentionItemsToRemove(items: readonly StoredItem[]): StoredItem[] {
     const cutoff = this.currentRetentionCutoff(this.settings.retentionDays);
-    const expired = items.filter((item) => Date.parse(item.updatedAt) < cutoff);
+    // Pinned items are exempt from both expiry and the maxItems cap: pinning is
+    // the user-visible "keep forever" signal, so it must not be silently undone
+    // by automatic retention.
+    const expired = items.filter((item) => !item.pinned && Date.parse(item.updatedAt) < cutoff);
     const expiredIds = new Set(expired.map((item) => item.id));
     const retained = items.filter((item) => !expiredIds.has(item.id));
-    const newest = [...retained].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const newest = [...retained]
+      .filter((item) => !item.pinned)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return [...expired, ...newest.slice(this.settings.maxItems)];
   }
 

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { ClipboardHistoryApi, EditableSettingsPatch, HistoryFilterType, HistoryQuery } from "../shared/types";
+import type { ClipboardHistoryApi, EditableSettingsPatch, HistoryFilterType, HistoryQuery, UpdaterState } from "../shared/types";
 
 const api: ClipboardHistoryApi = {
   list: (query?: HistoryQuery) => ipcRenderer.invoke("history:list", query),
@@ -17,6 +17,15 @@ const api: ClipboardHistoryApi = {
   setStartupEnabled: (enabled: boolean) => ipcRenderer.invoke("startup:setEnabled", enabled),
   getBackgroundState: () => ipcRenderer.invoke("background:getState"),
   showWindow: () => ipcRenderer.invoke("window:show"),
+  checkForUpdates: () => ipcRenderer.invoke("updater:check"),
+  getUpdaterState: () => ipcRenderer.invoke("updater:getState"),
+  onUpdaterState: (callback: (state: UpdaterState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: UpdaterState) => callback(state);
+    ipcRenderer.on("updater:state", listener);
+    return () => {
+      ipcRenderer.removeListener("updater:state", listener);
+    };
+  },
   exportHistory: () => ipcRenderer.invoke("history:export"),
   importHistory: () => ipcRenderer.invoke("history:import")
 };

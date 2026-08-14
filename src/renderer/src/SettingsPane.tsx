@@ -1,11 +1,12 @@
-import { IconCheck, IconPause, IconPlay, IconSave, IconSettings, IconTrash2 } from "./icons";
+import { IconCheck, IconPause, IconPlay, IconRefreshCw, IconSave, IconSettings, IconTrash2 } from "./icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AppSettings,
   ClipboardBackgroundState,
   EditableSettingsPatch,
   StartupState,
-  StorageStats
+  StorageStats,
+  UpdaterState
 } from "../../shared/types";
 import { DEFAULT_SETTINGS, MAX_TEXT_LENGTH } from "../../shared/types";
 import { formatBytes } from "../../shared/format";
@@ -21,6 +22,8 @@ type SettingsPaneProps = {
   onToggleLaunchAtStartup: (enabled: boolean) => void;
   onClear: () => void;
   onSaveSettings: (patch: EditableSettingsPatch) => void;
+  updaterState: UpdaterState | undefined;
+  onCheckUpdates: () => void;
   addToast: (text: string, type?: "success" | "error" | "info") => void;
 };
 
@@ -35,6 +38,8 @@ export function SettingsPane({
   onToggleLaunchAtStartup,
   onClear,
   onSaveSettings,
+  updaterState,
+  onCheckUpdates,
   addToast
 }: SettingsPaneProps) {
   const [editing, setEditing] = useState(false);
@@ -164,6 +169,29 @@ export function SettingsPane({
         </button>
       </div>
 
+      <button
+        className="wide-toggle"
+        type="button"
+        disabled={!updaterState || ["checking", "downloading", "available"].includes(updaterState.phase)}
+        onClick={onCheckUpdates}
+        style={{ fontSize: 12 }}
+      >
+        <IconRefreshCw size={15} />
+        <span>{updaterButtonLabel(updaterState)}</span>
+      </button>
+      {updaterState?.phase === "downloaded" && (
+        <div className="capture-status success" role="status" aria-live="polite">
+          <span className="capture-status-dot" aria-hidden="true" />
+          <span>退出应用后自动安装更新</span>
+        </div>
+      )}
+      {updaterState?.error && (
+        <div className="capture-status error" role="status" aria-live="polite">
+          <span className="capture-status-dot" aria-hidden="true" />
+          <span>{updaterState.error}</span>
+        </div>
+      )}
+
       <div className="limits">
         <IconCheck size={16} />
         <span>最近 {settings?.retentionDays ?? 30} 天 · 最多 {settings?.maxItems ?? 500} 条 · 单条文本 {(settings?.maxTextLength ?? DEFAULT_SETTINGS.maxTextLength).toLocaleString("zh-CN")} 字符 · 单图 {formatBytes(settings?.maxImageBytes ?? 0)}</span>
@@ -237,6 +265,24 @@ export function SettingsPane({
       )}
     </aside>
   );
+}
+
+function updaterButtonLabel(state: UpdaterState | undefined): string {
+  if (!state) return "检查更新";
+  switch (state.phase) {
+    case "checking":
+      return "正在检查更新…";
+    case "available":
+      return "发现新版本，正在下载…";
+    case "downloading":
+      return `正在下载更新 ${state.percent ?? 0}%…`;
+    case "downloaded":
+      return `更新已就绪（v${state.targetVersion}）`;
+    case "error":
+      return "检查更新";
+    default:
+      return `检查更新（当前 v${state.version}）`;
+  }
 }
 
 type CaptureStatus = {

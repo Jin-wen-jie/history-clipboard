@@ -198,7 +198,14 @@ async function verifyBackpressure(executable, ClipboardAgentFrameParser) {
     assertReady(ready, run.child);
 
     run.child.stdout.pause();
-    run.child.stdin.write("PING\n".repeat(BACKPRESSURE_PING_COUNT) + "SHUTDOWN\n");
+    // The Electron supervisor always resumes the helper's stdout before
+    // sending SHUTDOWN (clipboardAgentSupervisor.stop() calls resumeStdout),
+    // so mirror that here. A paused pipe can never be drained, and force-
+    // closing it mid-frame truncates the protocol stream — the helper cannot
+    // satisfy "clean EOF" unless the reader keeps consuming.
+    run.child.stdin.write("PING\n".repeat(BACKPRESSURE_PING_COUNT));
+    run.child.stdout.resume();
+    run.child.stdin.write("SHUTDOWN\n");
     const processResult = await withTimeout(
       run.processExit,
       BACKPRESSURE_SHUTDOWN_TIMEOUT_MS,

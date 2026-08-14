@@ -4,7 +4,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_SETTINGS, type AppSettings, type CopyPathResult, type HistoryFilterType, type HistoryPreviewResult, type HistoryQuery } from "../shared/types";
+import { DEFAULT_SETTINGS, type AppSettings, type CopyPathResult, type HistoryFilterType, type HistoryPreviewResult, type HistoryQuery, type UpdaterState } from "../shared/types";
 import {
   ClipboardRuntime,
   shouldReconcileAfterSettingsChange
@@ -13,14 +13,13 @@ import { requireBoolean, sanitizeEditableSettingsPatch } from "./lib/editableSet
 import { HistoryStore, type ImageInput } from "./lib/historyStore";
 import { SafeStorageKeyProvider } from "./lib/secureVault";
 import { ShutdownCoordinator } from "./lib/shutdownCoordinator";
+import { cleanupExportedImages } from "./lib/exportedImages";
 import {
   SecondInstanceWindowCoordinator,
   StartupManager,
   isLaunchAtLogin
 } from "./lib/startupManager";
-import updaterModule from "electron-updater";
-
-const { autoUpdater } = updaterModule;
+import { checkForUpdatesNow, getUpdaterState, initAppUpdater } from "./lib/appUpdater";
 
 const MAX_FILE_PREVIEW_BYTES = 2 * 1024 * 1024;
 const TEXT_PREVIEW_EXTENSIONS = new Set([
@@ -40,6 +39,10 @@ const secondInstanceWindowCoordinator = new SecondInstanceWindowCoordinator();
 
 function windowStatePath(): string {
   return join(app.getPath("userData"), "window-state.json");
+}
+
+function exportedImagesDir(): string {
+  return join(app.getPath("userData"), "exported-images");
 }
 
 function loadWindowBounds(): { x?: number; y?: number; width?: number; height?: number } {
@@ -110,6 +113,12 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
+  // Remove exported-image leftovers older than the cleanup window so the
+  // path-copy feature cannot grow the user-data folder without bound.
+  cleanupExportedImages(exportedImagesDir()).catch((error) => {
+    console.error("Exported image cleanup failed:", error);
+  });
+
   runtime = new ClipboardRuntime({
     helperPath: app.isPackaged
       ? join(process.resourcesPath, "clipboard-listener.exe")
@@ -137,19 +146,17 @@ async function bootstrap(): Promise<void> {
     mainWindow?.show();
   }
 
-  // Auto-updater
-  autoUpdater.logger = console;
-  autoUpdater.checkForUpdatesAndNotify().catch((error) => {
-    console.error("Auto-update check failed:", error);
-  });
-
-  // Check for updates hourly while the app is running, so a released
-  // version reaches users shortly after publishing (not only on launch).
-  setInterval(() => {
-    autoUpdater.checkForUpdatesAndNotify().catch((error) => {
-      console.error("Scheduled auto-update check failed:", error);
-    });
-  }, 60 * 60 * 1000).unref();
+  // Auto-updater: differential download via electron-updater (blockmap),
+  // so only the changed chunks of the installer are transferred.
+  initAppUpdater(handleUpdaterStateChange);
+  // Check on launch and hourly while the app is running, so a released
+  // version reaches this machine shortly after publishing (not only on launch).
+  if (app.isPackaged) {
+    void checkForUpdatesNow();
+    setInterval(() => {
+      void checkForUpdatesNow();
+    }, 60 * 60 * 1000).unref();
+  }
 }
 
 function createWindow(): void {
@@ -221,6 +228,11 @@ function refreshTrayMenu(): void {
           refreshTrayMenu();
         }
       },
+      {
+        label: updaterMenuLabel(),
+        enabled: !["checking", "downloading", "available"].includes(getUpdaterState().phase),
+        click: () => void checkForUpdatesNow()
+      },
       { type: "separator" },
       {
         label: "退出",
@@ -232,14 +244,32 @@ function refreshTrayMenu(): void {
   );
 }
 
+function updaterMenuLabel(): string {
+  const state = getUpdaterState();
+  switch (state.phase) {
+    case "checking":
+      return "正在检查更新…";
+    case "available":
+      return `发现新版本 v${state.targetVersion}，准备下载…`;
+    case "downloading":
+      return `正在下载更新 ${state.percent ?? 0}%…`;
+    case "downloaded":
+      return "更新已就绪（退出时自动安装）";
+    default:
+      return "检查更新…";
+  }
+}
+
+function handleUpdaterStateChange(_state: UpdaterState): void {
+  refreshTrayMenu();
+  mainWindow?.webContents.send("updater:state", getUpdaterState());
+}
+
 function registerIpc(): void {
   ipcMain.handle("history:list", async (_event, query?: HistoryQuery) => {
-    try {
-      return await store.list(query);
-    } catch (error) {
-      console.error("history:list error:", error);
-      return [];
-    }
+    // Let errors propagate so the renderer can surface a real error state
+    // instead of silently showing an empty list.
+    return store.list(query);
   });
   ipcMain.handle("history:delete", async (_event, id: string) => {
     try {
@@ -342,6 +372,12 @@ function registerIpc(): void {
       return { totalItems: 0, textItems: 0, imageItems: 0, fileItems: 0, imageBytes: 0 };
     }
   });
+  ipcMain.handle("updater:check", async () => {
+    await checkForUpdatesNow();
+    return getUpdaterState();
+  });
+  ipcMain.handle("updater:getState", async () => getUpdaterState());
+
   ipcMain.handle("window:show", async () => {
     try {
       showWindow();
@@ -433,7 +469,7 @@ async function copyPathHistoryItem(id: string): Promise<CopyPathResult> {
 
   // Images live inside the app vault (no real file path), so export the PNG
   // to a stable folder first, then copy the exported file's path.
-  const exportDir = join(app.getPath("userData"), "exported-images");
+  const exportDir = exportedImagesDir();
   const exportPath = join(exportDir, `${id}.png`);
   await mkdir(exportDir, { recursive: true });
   await writeFile(exportPath, content.png);

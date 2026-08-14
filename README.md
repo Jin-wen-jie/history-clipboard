@@ -42,6 +42,25 @@ npm run dist
 
 安装包尚未进行代码签名，首次下载运行时 Windows SmartScreen 可能会提示风险。请仅从本仓库的 Release 页面下载，并在确认发布来源后继续安装。
 
+## 发布新版本与自动更新（差量更新）
+
+已安装的电脑会在启动时和每小时自动检查更新。发现新版本后，客户端通过 blockmap 差分只下载与上一版不同的字节块（通常只有几 MB），退出应用时静默安装，下次打开即为新版本——全程无需手动下载安装包。托盘菜单和设置面板里也可以手动「检查更新」并查看下载进度。
+
+发布流程（改完源码后只需两步）：
+
+```bash
+npm version 0.1.10      # 修改 package.json 版本号、自动提交并打 tag
+npm test && npm run build
+git push --follow-tags  # 推送代码和 tag
+```
+
+推送 tag 后 GitHub Actions（`.github/workflows/release.yml`）会自动构建、创建 Release 并上传安装包 + blockmap + latest.yml，各台电脑随即自动更新。
+
+注意：
+
+- 必须用 NSIS 安装包装过（`npm run dist` 生成的安装包）。直接运行 `release\win-unpacked\` 里的 exe 或 `npm run dev` 不会参与自动更新。
+- 差量下载依赖本机缓存的上一版安装包（位于 `%LOCALAPPDATA%\history-clipboard-updater`），某台电脑首次更新时会下载完整包，之后都是几 MB 的差分。
+
 ## 上传到 GitHub
 
 ```bash
